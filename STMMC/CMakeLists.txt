@@ -28,7 +28,9 @@ cet_build_plugin(HPGeTree art::module
     REG_SOURCE src/HPGeTree_module.cc
     LIBRARIES REG
       art_root_io::TFileService_service
+      Offline::GeometryService
       Offline::MCDataProducts
+      Offline::STMGeom
 )
 
 cet_build_plugin(HPGeWaveformsFromStepPointMCs art::module
@@ -36,11 +38,13 @@ cet_build_plugin(HPGeWaveformsFromStepPointMCs art::module
     LIBRARIES REG
       art_root_io::TFileService_service
       Offline::DataProducts
+      Offline::GeometryService
       Offline::MCDataProducts
       Offline::Mu2eUtilities
       Offline::ProditionsService
       Offline::RecoDataProducts
       Offline::STMConditions
+      Offline::STMGeom
       Offline::GlobalConstantsService
 )
 cet_build_plugin(MWDTree art::module
