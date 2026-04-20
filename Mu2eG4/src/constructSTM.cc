@@ -2445,6 +2445,20 @@ namespace mu2e {
      fHPGePV.solid = HPGe_Detector;
      G4ThreeVector stmHPGeCrystalInParent = STMShieldingRef + G4ThreeVector(-offset_Spot + offset_HPGe - (WindowD_HPGe + AirD_HPGe + Capsule_Windowthick + CrystalL_HPGe/2)*sqrt(2)/2, 0., Front_T +  Z_HPGe + (WindowD_HPGe + AirD_HPGe + Capsule_Windowthick + CrystalL_HPGe/2)*sqrt(2)/2);
 
+     {
+       G4ThreeVector stmHPGeCrystalInMu2e = stmHPGeCrystalInParent + parentCenterInMu2e;
+       std::cout << "===== constructSTM HPGe crystal placement =====" << std::endl;
+       std::cout << "  parentCenterInMu2e (HallAir) (mm): " << parentCenterInMu2e << std::endl;
+       std::cout << "  STMShieldingRef (in parent) (mm) : " << STMShieldingRef << std::endl;
+       std::cout << "  stmHPGeCrystalInParent (mm)      : " << stmHPGeCrystalInParent << std::endl;
+       std::cout << "  stmHPGeCrystalInMu2e   (mm)      : " << stmHPGeCrystalInMu2e << std::endl;
+       std::cout << "  offset_Spot, offset_HPGe, Front_T, Z_HPGe: "
+                 << offset_Spot << ", " << offset_HPGe << ", " << Front_T << ", " << Z_HPGe << std::endl;
+       std::cout << "  WindowD, AirD, Capsule_Windowthick, CrystalL: "
+                 << WindowD_HPGe << ", " << AirD_HPGe << ", " << Capsule_Windowthick << ", " << CrystalL_HPGe << std::endl;
+       std::cout << "===============================================" << std::endl;
+     }
+
      if(pHPGeDetectorParams.build()){
                       finishNesting(fHPGePV,
                       findMaterialOrThrow(pHPGeDetectorParams.crystalMaterial()),
