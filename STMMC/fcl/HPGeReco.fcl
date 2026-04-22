@@ -24,6 +24,7 @@ physics : {
       fADC : @local::STMDAQParameters.samplingFrequencies.HPGe #TODO - make this module work with multiple frequencies
       EnergyPerADCBin : @local::HPGeDigitization.EnergyPerADCBin
       NoiseSD : @local::HPGeDigitization.PreamplifierNoiseSD
+      FanoFactor : @local::HPGeDigitization.FanoFactor
       risingEdgeDecayConstant : @local::HPGeDigitization.DecayConstant
       microspillBufferLengthCount : @local::HPGeDigitization.microspillBufferLengthCount
       makeTTree : false

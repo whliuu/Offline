@@ -177,6 +177,7 @@ STMDAQParameters : {
 HPGeDigitization : {
     EnergyPerADCBin : 0.5 # keV/bin
     PreamplifierNoiseSD : 0.32 # mV
+    FanoFactor : 0.1 # dimensionless; Ge Fano factor at 77 K
     DecayConstant : 50 # us
     resetEventNumber : 31858
     microspillBufferLengthCount : 1000
