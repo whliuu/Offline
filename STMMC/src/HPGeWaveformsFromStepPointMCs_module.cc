@@ -17,11 +17,14 @@
 #include "art/Framework/Core/EDProducer.h"
 #include "art/Framework/Principal/Event.h"
 #include "art/Framework/Principal/Handle.h"
+#include "art/Framework/Services/Registry/ServiceHandle.h"
+#include "art/Framework/Services/Optional/RandomNumberGenerator.h"
 
 // CLHEP includes
 #include "CLHEP/Vector/ThreeVector.h"
 #include "CLHEP/Vector/Rotation.h"
 #include "CLHEP/Units/PhysicalConstants.h"
+#include "CLHEP/Random/RandGaussQ.h"
 
 // exception handling
 #include "cetlib_except/exception.h"
@@ -41,6 +44,7 @@
 // #include "Offline/Mu2eUtilities/inc/STMUtils.hh"
 // #include "Offline/ProditionsService/inc/ProditionsHandle.hh"
 #include "Offline/RecoDataProducts/inc/STMWaveformDigi.hh"
+#include "Offline/SeedService/inc/SeedService.hh"
 #include "Offline/STMGeom/inc/HPGeDetector.hh"
 #include "Offline/STMGeom/inc/STM.hh"
 // #include "Offline/STMConditions/inc/STMEnergyCalib.hh"
@@ -185,6 +189,13 @@ namespace mu2e {
     std::vector<double> _chargeCarryOver;                                                                       // Temporary buffer that will store _chargeCollected over the course of the next event
     std::vector<int16_t> _adcs;                                                                                 // Buffer for storing the ADC values to put into the STMWaveformDigi
 
+    // Random engine + Gaussian noise distribution, seeded via SeedService so
+    // every microspill draws from a distinct part of the stream (previously
+    // a default-seeded engine was constructed in addNoise() each call, giving
+    // identical noise on every microspill).
+    art::RandomNumberGenerator::base_engine_t& _engine;
+    CLHEP::RandGaussQ _noiseGauss;
+
     // Offline utilities
     // TODO: include the prodition to get the sampling frequency
     // mu2e::STMChannel::enum_type _HPGeChannel = static_cast<mu2e::STMChannel::enum_type>(1);
@@ -197,7 +208,9 @@ namespace mu2e {
       fADC(conf().fADC()),
       ADCToEnergy(conf().ADCToEnergy()),
       noiseSD(conf().noiseSD()),
-      risingEdgeDecayConstant(conf().risingEdgeDecayConstant()) {
+      risingEdgeDecayConstant(conf().risingEdgeDecayConstant()),
+      _engine(createEngine(art::ServiceHandle<SeedService>()->getSeed())),
+      _noiseGauss(_engine, 0.0, 1.0) {
         produces<STMWaveformDigiCollection>("HPGe");
         // Collect all configured input tags
         art::InputTag tag;
@@ -592,11 +605,12 @@ namespace mu2e {
     if (noiseSD < std::numeric_limits<double>::epsilon())
       return;
 
-    // Add the noise in multiples of the fundamental charge
-    std::default_random_engine _randomGen;
-    std::normal_distribution<double> _noiseDistribution(0.0, noiseSD);
+    // Draw Gaussian noise per sample from the SeedService-seeded engine.
+    // _noiseGauss has unit variance; multiply by noiseSD to get the
+    // configured noise amplitude (in the same charge-carrier units as
+    // _chargeDecayed after the mV->charge conversion in the constructor).
     for (size_t _i = 0; _i < nADCs; _i++)
-      _chargeDecayed[_i] += _noiseDistribution(_randomGen);
+      _chargeDecayed[_i] += noiseSD * _noiseGauss.fire();
     return;
   };
 
