@@ -248,7 +248,9 @@ namespace mu2e {
         std::cout << "MWD: found " << nPeaks << " peaks in event " << event.id() << std::endl;
       for (i = 0; i < nPeaks; ++i) {
         mwd_energy = (peak_heights[i] < ADCMax) ? ADCMax : static_cast<int16_t>(peak_heights[i]); // When saturating the int16_t limit, deconvolution goes below the int16_t limit so the energy turns negative. This clips the energy and the limit
-        STMMWDDigi mwd_digi(peak_times[i], -1 * mwd_energy); // peak_heights are negative, make them positive here
+        // peak_times[i] is the in-waveform sample index; offset by trigTimeOffset
+        // so the stored time is a global tick consistent with the MWD stages TTree.
+        STMMWDDigi mwd_digi(waveform.trigTimeOffset() + peak_times[i], -1 * mwd_energy); // peak_heights are negative, make them positive here
         if (mwd_digi.energy() < -100)
           throw cet::exception("logicError", "The peak height must be positive!");
 
@@ -366,13 +368,10 @@ namespace mu2e {
 
     for(i = M; i < nADCs; i++){
       if (averaged_data[i] < threshold_cut) { // the waveforms are negative so if we go below this threshold we have seen a peak
-        if (averaged_data[i] < averaged_data[i - 1] && averaged_data[i] < lowest_height){ // if the current value is lower than the previous value and lower than the lowest value we've seen so far
-          lowest_height = averaged_data[i]; // record the lowest height
-          if (lowest_height_time == -1)
-            lowest_height_time = i; // record the time we cross the threshold
+        if (averaged_data[i] < lowest_height) { // strictly lower than anything seen so far in this peak
+          lowest_height = averaged_data[i];
+          lowest_height_time = i; // record the tick of the minimum, not the threshold crossing
         }
-        else
-          continue;
       };
       if (lowest_height_time == -1) // this will be true if we haven't seen a peak yet
         continue;
