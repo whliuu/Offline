@@ -198,6 +198,12 @@ namespace mu2e {
     art::RandomNumberGenerator::base_engine_t& _engine;
     CLHEP::RandGaussQ _noiseGauss;
 
+    // Crystal rotation loaded from GeomService in beginRun.
+    // Used in depositCharge() to transform world -> crystal-local coordinates.
+    // Falls back to rotateY(-45 deg) if GeomService is unavailable.
+    CLHEP::HepRotation crystalRotation_;
+    bool crystalRotationLoaded_ = false;
+
     // Offline utilities
     // TODO: include the prodition to get the sampling frequency
     // mu2e::STMChannel::enum_type _HPGeChannel = static_cast<mu2e::STMChannel::enum_type>(1);
@@ -330,6 +336,8 @@ namespace mu2e {
         // Leaving the hardcoded crystalCentrePosition in place; using this as
         // a diagnostic only until we add a helper to HPGeDetector that returns
         // the crystal centre directly.
+        crystalRotation_ = rot;
+        crystalRotationLoaded_ = true;
         std::cout << "===== HPGe geometry check =====" << std::endl;
         std::cout << "  GeomService origin (mm): (" << actual.x() << ", "
                   << actual.y() << ", " << actual.z() << ")" << std::endl;
@@ -462,20 +470,31 @@ namespace mu2e {
       return;
     }
 
-    // Tranform the co-ordinate system to be a cylinder in the +z direction
-    // Shift the position to a local cylindrical co-ordinate system with the center of the crystal at the origin
+    // Transform world position into crystal-local coordinates.
+    // Shift to crystal-centre origin, then apply inverse of the crystal rotation
+    // (rotateY(-45 deg) per GeomService) so the crystal axis points along +z.
+    // The original rotateY(+45) was wrong: it applied the forward rotation instead
+    // of the inverse, mirroring the crystal envelope relative to HPGeTree.
+    // Falls back to rotateY(-45 deg) if GeomService was unavailable in beginRun.
     hitPosition -= crystalCentrePosition;
-    // Rotate the cylinder for the axis to point in the +z direction
-    hitPosition.rotateY(45.0*CLHEP::degree);
-    // Shift the crystal so the front of the crystal is the start
+    if (crystalRotationLoaded_) {
+      hitPosition = crystalRotation_.inverse() * hitPosition;
+    } else {
+      hitPosition.rotateY(-45.0*CLHEP::degree);
+    }
+    // Shift so the front face of the crystal is at z=0
     hitPosition.setZ(hitPosition.z() + (crystalL/2));
 
     // Redefine the hit direction.
     hitR = hitPosition.perp();
     hitZ = hitPosition.z();
 
-    // Run checks
-    if (hitZ < -stepPositionTolerance || hitZ > maxZ || hitR > maxR) {
+    // Run checks: reject steps outside the outer crystal envelope or inside the bore hole.
+    // In the cylindrical region (hitZ > crystalHoleZStart) the bore is at R < crystalHoleR;
+    // steps there are in the dead bore volume and electronTravelDistance would go negative.
+    const bool outsideOuter = (hitZ < -stepPositionTolerance || hitZ > maxZ || hitR > maxR);
+    const bool insideBore   = (hitZ > crystalHoleZStart && hitR < crystalHoleR - stepPositionTolerance);
+    if (outsideOuter || insideBore) {
       ++n_reject_bounds;
       if (hStepXZ_reject) hStepXZ_reject->Fill(step.position().x(), step.position().z());
       if (hStepR_reject)  hStepR_reject->Fill(hitR);
@@ -484,7 +503,8 @@ namespace mu2e {
         std::cout << "HPGeDigi bounds-reject #" << n_reject_bounds
                   << " world=" << step.position()
                   << " local(R,Z)=(" << hitR << "," << hitZ << ")"
-                  << " maxR=" << maxR << " maxZ=" << maxZ << std::endl;
+                  << " maxR=" << maxR << " maxZ=" << maxZ
+                  << (insideBore ? " [inside bore]" : "") << std::endl;
       }
       return;
     }
