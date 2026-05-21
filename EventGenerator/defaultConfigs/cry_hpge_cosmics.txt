@@ -1,0 +1,86 @@
+// CRY configuration for the HPGe cosmic-ray background study.
+//
+// Full cosmic spectrum: muons, neutrons, protons, gammas, electrons, pions
+// and kaons are all enabled. This supersedes the earlier muon-only config so
+// the study captures the realistic mix of cosmic primaries -- and the
+// secondaries they produce in the crystal and surrounding material.
+//
+// Target box (Mu2e world coordinates, mm) tightly brackets the HPGe crystal.
+// The crystal centre is (-3986.3, 0, 40612.7); its world bounding box
+// (R = 36.05 mm, L = 78.5 mm, rotated 45 deg in x-z) is
+//   x in [-4039, -3933], y in [-36, 36], z in [40560, 40666].
+// The box below adds a ~110 mm margin on each side.
+//
+// projectToTargetBox = true makes CRYEventGenerator resample internally (the
+// while-loop in CosmicCRY::generate) until a primary's straight-line
+// trajectory crosses this box, so every event handed to Geant4 passes close
+// to the crystal. Shrinking the box from the old 2.5 m x 4 m footprint
+// (10 m^2) to 0.33 m x 0.33 m (0.11 m^2) raises the per-G4-event probability
+// of a crystal hit by ~90x. This does NOT bias the physical rate: CRY's
+// CosmicLivetime accumulates proportionally more per accepted event, so the
+// hit rate (N_hits / livetime) used to normalise Stage 2 is invariant.
+//
+// To also capture muon-induced secondaries born in the SSC collimator just
+// upstream (tungsten block centred near z = 40404), widen targetBoxZmin
+// toward 40300 and targetBoxXmin/Xmax to roughly [-4200, -3700]. That trades
+// some speed (larger footprint) for a more complete shielding-secondary
+// background.
+//
+// projectToTargetBox = true is also required for correctness: without it
+// primaries are placed at the raw CRY reference height, above the world
+// ceiling (~15365 mm), which causes a Geant4 segfault on the first event.
+
+// Verbose
+int cosmicCRY.verbose = 0;
+
+string cosmicCRY.refPoint = "CALO";
+double cosmicCRY.refY0 = 14000; // mm -- below world ceiling (~15365 mm)
+
+// Project to target box and world boundary (required to avoid segfault)
+bool cosmicCRY.projectToTargetBox = true;
+
+// Target box: tight bracket around the HPGe crystal (Mu2e world coords, mm)
+double cosmicCRY.targetBoxXmin = -4150;
+double cosmicCRY.targetBoxXmax = -3820;
+double cosmicCRY.targetBoxYmin =   -50;
+double cosmicCRY.targetBoxYmax =   500;
+double cosmicCRY.targetBoxZmin = 40450;
+double cosmicCRY.targetBoxZmax = 40780;
+
+// Full cosmic spectrum -- all species enabled
+bool cosmicCRY.returnMuons     = true;
+bool cosmicCRY.returnNeutrons  = true;
+bool cosmicCRY.returnProtons   = true;
+bool cosmicCRY.returnGammas    = true;
+bool cosmicCRY.returnElectrons = true;
+bool cosmicCRY.returnPions     = true;
+bool cosmicCRY.returnKaons     = true;
+
+// Date
+int cosmicCRY.month = 6;
+int cosmicCRY.day   = 21;
+int cosmicCRY.year  = 2021;
+
+// Experiment site settings
+double cosmicCRY.latitude  = 41.8;
+int    cosmicCRY.altitude  = 0;   // metres: 0, 2100 or 11300
+
+// CRY lateral sampling box [m]. Must enclose the target box. It only affects
+// how many times CRY resamples internally before a primary hits the target
+// box (i.e. CRY CPU time); it does not change Geant4 acceptance or the
+// physical rate, both of which are fixed by CosmicLivetime normalisation.
+// Mu2e defaults: 30 m (othersCRYconfig) up to 300 m (defaultCRYconfig).
+// With our 0.33 m target box, even 30 m wastes ~99% of CRY samples. 10 m is
+// a conservative speedup (~9x fewer rejections) that stays close to the
+// validated othersCRYconfig value; do not push below ~5 m without checking
+// the angular distribution of accepted primaries against a 30 m baseline.
+double cosmicCRY.subboxLength = 10;
+
+// Energy window on the generated primary kinetic energy [MeV]. CRY skips
+// primaries below minShowerEn, so the soft (< 50 MeV) cosmic component is not
+// generated -- consistent with the Mu2e default. Lower minShowerEn to include
+// softer primaries, at the cost of generating far more particles.
+double cosmicCRY.minShowerEn = 50;
+double cosmicCRY.maxShowerEn = 1e8;
+
+// vim: ft=cpp

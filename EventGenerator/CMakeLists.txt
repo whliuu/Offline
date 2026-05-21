@@ -647,6 +647,7 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/defaultConfigs/othersCRYconfig.txt   
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/defaultConfigs/particleGun.txt	      ${CURRENT_BINARY_DIR} defaultConfigs/particleGun.txt	     )
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/defaultConfigs/primaryProtonGun.txt   ${CURRENT_BINARY_DIR} defaultConfigs/primaryProtonGun.txt  )
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/defaultConfigs/surfaceCheck.txt       ${CURRENT_BINARY_DIR} defaultConfigs/surfaceCheck.txt      )
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/defaultConfigs/cry_hpge_cosmics.txt   ${CURRENT_BINARY_DIR} defaultConfigs/cry_hpge_cosmics.txt  )
 
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/data/acDipoleTransmissionFunction.txt      ${CURRENT_BINARY_DIR} data/acDipoleTransmissionFunction.txt     )
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/data/czarnecki_Al.tbl		      ${CURRENT_BINARY_DIR} data/czarnecki_Al.tbl		     )

@@ -1,0 +1,89 @@
+# Grid-submission version of HPGeWaveformStudy_cosmics_s1.fcl.
+#
+# Identical to the laptop version except:
+#   - outputs.s1out.fileName uses a 6-field Mu2e-convention placeholder
+#     so generate_fcl can parse and substitute it per segment.
+#   - services.SeedService.baseSeed is unset; generate_fcl injects a fresh
+#     seed per segment.
+#
+# Kept as a flat file (no #include of the laptop version) because
+# generate_fcl --embed cannot resolve includes that live outside
+# Offline/ or Production/ on FHICL_FILE_PATH.
+
+#include "Offline/fcl/minimalMessageService.fcl"
+#include "Offline/fcl/standardProducers.fcl"
+#include "Offline/fcl/standardServices.fcl"
+
+process_name: HPGeCosmicsS1
+
+source : {
+  module_type : EmptyEvent
+  maxEvents   : 20000
+}
+
+services : @local::Services.Sim
+services.SeedService.maxUniqueEngines : 20
+services.TFileService.fileName        : "/dev/null"
+services.scheduler.wantSummary        : true
+
+physics : {
+
+  producers : {
+
+    generate : {
+      module_type : CRYEventGenerator
+      inputFile   : "Offline/EventGenerator/defaultConfigs/cry_hpge_cosmics.txt"
+    }
+
+    g4run : @local::g4run
+
+    genCounter : { module_type : GenEventCounter }
+
+  }
+
+  filters : {
+
+    g4status : {
+      module_type       : FilterStatusG4
+      input             : "g4run"
+      maxAcceptedStatus : 9
+    }
+
+    stmHitFilter : {
+      module_type         : FilterG4Out
+      mainHitInputs       : [ "g4run:STMDet" ]
+      extraHitInputs      : []
+      mcTrajectoryInputs  : [ "g4run" ]
+      vetoDaughters       : []
+    }
+
+  }
+
+  s1path : [ generate, genCounter, g4run, g4status, stmHitFilter ]
+  outpath : [ s1out ]
+
+  trigger_paths : [ s1path ]
+  end_paths     : [ outpath ]
+
+}
+
+physics.producers.g4run.physics.physicsListName : "QGSP_BERT_EMZ"
+physics.producers.g4run.SDConfig.enableSD       : [ STMDet ]
+
+outputs : {
+  s1out : {
+    module_type   : RootOutput
+    fileName      : "sim.leoliu.hpge0b0s11r0000.hpge_cosmics.000000_00000000.art"
+    SelectEvents  : [ "s1path" ]
+    outputCommands : [
+      "drop *",
+      "keep art::TriggerResults_*_*_*",
+      "keep mu2e::GenParticles_generate_*_*",
+      "keep mu2e::CosmicLivetime_generate_*_*",
+      "keep mu2e::GenEventCount_genCounter_*_*",
+      "keep mu2e::StepPointMCs_stmHitFilter_STMDet_*",
+      "keep mu2e::SimParticlemv_stmHitFilter__*",
+      "keep mu2e::StatusG4_g4run_*_*"
+    ]
+  }
+}
