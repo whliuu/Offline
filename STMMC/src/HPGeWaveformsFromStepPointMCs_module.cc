@@ -544,8 +544,17 @@ namespace mu2e {
       R2 = electronTravelDistance + holeTravelDistance + crystalHoleR + stepPositionTolerance * 2;
     };
 
-    if (holeTravelDistance < 0 || electronTravelDistance < 0)
-      throw cet::exception("LogicError") << "Electron (" << electronTravelDistance << ") and hole (" << holeTravelDistance << ") travelling distances should both be positve.\nPosition found at " << step.position() << "(" << hitPosition << ")\n";
+    if (holeTravelDistance < 0 || electronTravelDistance < 0) {
+      ++n_reject_bounds;
+      if (n_reject_bounds <= 20) {
+        std::cout << "HPGeDigi drift-reject #" << n_reject_bounds
+                  << " world=" << step.position()
+                  << " local=(" << hitPosition << ")"
+                  << " eDist=" << electronTravelDistance
+                  << " hDist=" << holeTravelDistance << std::endl;
+      }
+      return;
+    }
 
     // Calculate the drift times
     electronTravelTime = electronTravelDistance / electronDriftVelocity;
