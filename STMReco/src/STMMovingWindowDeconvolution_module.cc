@@ -57,7 +57,8 @@ namespace mu2e {
         fhicl::Atom<double> tau{Name("tau"), Comment("Decay constant of the waveform (used in the deconvolution step) [ns]")};
         fhicl::Atom<double> M{Name("M"), Comment("M parameter (number of samples to differentiate between)")};
         fhicl::Atom<double> L{Name("L"), Comment("L parameter (number of samples to average over)")};
-        fhicl::Atom<double> nsigma_cut{Name("nsigma_cut"), Comment("Number of sigma away from baseline_mean to cut (for finding peaks)")};
+        fhicl::Atom<double> nsigma_cut{Name("nsigma_cut"), Comment("Number of sigma away from baseline_mean to cut (for finding peaks). Ignored if FixedThresholdADC is set.")};
+        fhicl::OptionalAtom<double> FixedThresholdADC{Name("FixedThresholdADC"), Comment("If set, use a fixed peak-finding threshold at this depth below baseline_mean [ADC], instead of the dynamic nsigma_cut * baseline_stddev. Must be positive.")};
         fhicl::Atom<double> thresholdgrad{Name("thresholdgrad"), Comment("Threshold on gradient to cut out peaks when calculating baseline")};
         fhicl::Atom<double> defaultBaselineMean{Name("defaultBaselineMean"), Comment("Default mean to use for baseline when ZS removes all baseline data, in ADC values")};
         fhicl::Atom<double> defaultBaselineSD{Name("defaultBaselineSD"), Comment("Default standard deviation to use for baseline when ZS removes all baseline data, in ADC values")};
@@ -91,6 +92,8 @@ namespace mu2e {
     double M = 0.0;                                                       // M-parameter (used in differentiation step)
     double L = 0.0;                                                       // L-parameter (used in averaging step)
     double nsigma_cut = 0.0;                                              // number of sigma away from baseline mean to cut (used in find_peaks)
+    bool useFixedThreshold = false;                                       // true when FixedThresholdADC is configured
+    double fixedThresholdADC = 0.0;                                       // fixed peak threshold as depth below baseline_mean [ADC]
     double thresholdgrad = 0.0;                                           // threshold on gradient
     double defaultBaselineMean = 0.0;
     double defaultBaselineSD = 0.0;
@@ -156,6 +159,9 @@ namespace mu2e {
       produces<STMMWDDigiCollection>();
       if (M < L)
         throw cet::exception("Configuration", "L (" + std::to_string(L) + ") is greater than M (" + std::to_string(M) + "), reconfigure\n");
+      useFixedThreshold = conf().FixedThresholdADC(fixedThresholdADC);
+      if (useFixedThreshold && fixedThresholdADC <= 0.0)
+        throw cet::exception("Configuration", "FixedThresholdADC must be positive, got " + std::to_string(fixedThresholdADC) + "\n");
       verbosityLevel = conf().verbosityLevel() ? *(conf().verbosityLevel()) : 0;
       if (verbosityLevel > 10)
         verbosityLevel = 10;
@@ -196,7 +202,9 @@ namespace mu2e {
       std::cout << std::left << "\t\t" << std::setw(15) << "tau"            << tau           << std::endl;
       std::cout << std::left << "\t\t" << std::setw(15) << "M"              << M             << std::endl;
       std::cout << std::left << "\t\t" << std::setw(15) << "L"              << L             << std::endl;
-      std::cout << std::left << "\t\t" << std::setw(15) << "nsigma_cut"     << nsigma_cut    << std::endl;
+      std::cout << std::left << "\t\t" << std::setw(15) << "nsigma_cut"     << nsigma_cut    << (useFixedThreshold ? " (ignored: FixedThresholdADC set)" : "") << std::endl;
+      if (useFixedThreshold)
+        std::cout << std::left << "\t\t" << std::setw(15) << "FixedThresholdADC" << " " << fixedThresholdADC << std::endl;
       std::cout << std::left << "\t\t" << std::setw(15) << "thresholdgrad"  << thresholdgrad << std::endl;
       std::cout << "\tChannel: " << std::endl;
       std::cout << std::left << "\t\t" << std::setw(15) << "Name" << channel.name()                  << std::endl;
@@ -362,7 +370,10 @@ namespace mu2e {
   };
 
   void STMMovingWindowDeconvolution::find_peaks() {
-    threshold_cut = baseline_mean - nsigma_cut * baseline_stddev;
+    // Fixed mode: user-specified depth below the measured baseline mean.
+    // Dynamic mode (default): depth scales with the measured baseline noise.
+    threshold_cut = useFixedThreshold ? baseline_mean - fixedThresholdADC
+                                      : baseline_mean - nsigma_cut * baseline_stddev;
     lowest_height = 0;
     lowest_height_time = -1; // in clock ticks
 
@@ -420,7 +431,7 @@ namespace mu2e {
       h_baseline_mean->SetBinContent(i+1, baseline_mean);
       h_baseline_mean_plus_stddev->SetBinContent(i+1, baseline_mean + baseline_stddev);
       h_baseline_mean_minus_stddev->SetBinContent(i+1, baseline_mean - baseline_stddev);
-      h_peak_threshold->SetBinContent(i+1, baseline_mean - nsigma_cut * baseline_stddev);
+      h_peak_threshold->SetBinContent(i+1, threshold_cut); // effective threshold: fixed or dynamic
     }
     TH1D* h_peaks = tfs->make<TH1D>(("h_peaks"+histsuffix.str()).c_str(), "Peaks", binning.nbins(),binning.low(),binning.high());
     for (size_t i_peak = 0; i_peak < peak_heights.size(); ++i_peak) {
