@@ -458,7 +458,18 @@ namespace mu2e {
     // Define variables that couldn't be constructed in the class constructor
     const CLHEP::Hep3Vector holeHemisphereCenter(0.0, 0.0, crystalHoleZStart); // Crystal hole position in local crystal co-ordinates
 
-    hitPosition = step.position();
+    // Use the POST-step point: that is where the step's energy is deposited.
+    // StepPointMC::position() is the PRE-step point, which for a gamma can be a
+    // mean free path away (~cm). A photoabsorption deposits the shell
+    // binding-energy residual locally at the post-step point, so testing the
+    // pre-step point against the crystal envelope discarded that deposit
+    // whenever the gamma's previous vertex lay outside the crystal -- while the
+    // photoelectron (a separate track, starting inside) was still collected.
+    // That produced a reco satellite peak one Ge K binding energy (11.103 keV)
+    // below the photopeak, and drove the large "out-of-bounds" rejection count
+    // reported in the loss breakdown. Same fix as HPGeTree_module.cc. See
+    // analysis/HPGeWaveformStudy/spectrum/devlogs/2026-08-05_satellite_analysis_debug.md
+    hitPosition = step.postPosition();
     // Only take the StepPoinMCs in the HPGe detector. STMDet is both sensitive volume of both the HPGe and LaBr.
     if (hitPosition.x() > -3904) {
       ++n_reject_xcut;
@@ -496,19 +507,19 @@ namespace mu2e {
     const bool insideBore   = (hitZ > crystalHoleZStart && hitR < crystalHoleR - stepPositionTolerance);
     if (outsideOuter || insideBore) {
       ++n_reject_bounds;
-      if (hStepXZ_reject) hStepXZ_reject->Fill(step.position().x(), step.position().z());
+      if (hStepXZ_reject) hStepXZ_reject->Fill(step.postPosition().x(), step.postPosition().z());
       if (hStepR_reject)  hStepR_reject->Fill(hitR);
       if (hStepZ_reject)  hStepZ_reject->Fill(hitZ);
       if (n_reject_bounds <= 20) {
         std::cout << "HPGeDigi bounds-reject #" << n_reject_bounds
-                  << " world=" << step.position()
+                  << " world=" << step.postPosition()
                   << " local(R,Z)=(" << hitR << "," << hitZ << ")"
                   << " maxR=" << maxR << " maxZ=" << maxZ
                   << (insideBore ? " [inside bore]" : "") << std::endl;
       }
       return;
     }
-    if (hStepXZ_pass) hStepXZ_pass->Fill(step.position().x(), step.position().z());
+    if (hStepXZ_pass) hStepXZ_pass->Fill(step.postPosition().x(), step.postPosition().z());
     if (hStepR_pass)  hStepR_pass->Fill(hitR);
     if (hStepZ_pass)  hStepZ_pass->Fill(hitZ);
 
@@ -548,7 +559,7 @@ namespace mu2e {
       ++n_reject_bounds;
       if (n_reject_bounds <= 20) {
         std::cout << "HPGeDigi drift-reject #" << n_reject_bounds
-                  << " world=" << step.position()
+                  << " world=" << step.postPosition()
                   << " local=(" << hitPosition << ")"
                   << " eDist=" << electronTravelDistance
                   << " hDist=" << holeTravelDistance << std::endl;

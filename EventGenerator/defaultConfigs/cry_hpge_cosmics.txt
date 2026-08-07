@@ -33,8 +33,17 @@
 // Verbose
 int cosmicCRY.verbose = 0;
 
-string cosmicCRY.refPoint = "CALO";
-double cosmicCRY.refY0 = 14000; // mm -- below world ceiling (~15365 mm)
+// Reference point: centre of the CRY generation plane in (X,Z). Must sit
+// directly above the HPGe crystal, otherwise cosmics are spawned over the
+// wrong place and only steeply-slanted trajectories thread the target box.
+// The built-in "CALO" choice centres the plane over the calorimeter disk
+// (z ~ 11800 mm), ~29 m UPSTREAM of the STM HPGe (z = 40612.7 mm), so every
+// accepted primary rains in from upstream. Use UNDEFINED + explicit crystal
+// coords (same Mu2e frame as the target box) so cosmics descend from above.
+string cosmicCRY.refPoint = "UNDEFINED";
+double cosmicCRY.refX0 = -3986.30; // mm -- HPGe crystal X (Mu2e world)
+double cosmicCRY.refZ0 =  40612.70; // mm -- HPGe crystal Z (Mu2e world)
+double cosmicCRY.refY0 =  14000; // mm -- below world ceiling (~15365 mm)
 
 // Project to target box and world boundary (required to avoid segfault)
 bool cosmicCRY.projectToTargetBox = true;

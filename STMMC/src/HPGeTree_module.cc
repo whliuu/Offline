@@ -12,7 +12,7 @@
 //  - StepPointMCsTag - tag of data product containing the StepPoints for STMDet
 //  - SimParticlemvTag - tag of data product containing the SimParticles for STMDet
 // Original author: Ivan Logashenko
-// Adapted by: Pawel Plesniak
+// Adapted by: Pawel Plesniak & Leo Liu
 
 // stdlib includes
 #include <limits>
@@ -278,7 +278,19 @@ namespace mu2e {
       else if ((detector == "LaBr") && (step.position().x() < xBeamCentre))
         continue;
 
-      const CLHEP::Hep3Vector& worldPos = step.position();
+      // Use the POST-step point to decide where this step's energy landed.
+      // StepPointMC::position() is the PRE-step point (Mu2eG4SensitiveDetector
+      // fills it from GetPreStepPoint()), which for a gamma can be a mean free
+      // path away from where the energy is actually deposited. A photoabsorption
+      // deposits the shell binding-energy residual locally at the post-step
+      // point; testing the pre-step point dropped that deposit from ECrystal
+      // whenever the gamma's previous vertex lay outside the crystal cylinder,
+      // while the photoelectron (a separate track, starting inside) was still
+      // counted. That produced satellite peaks exactly one Ge shell binding
+      // energy below the full-energy peak (K 11.103, L 1.22-1.41, M ~0.14 keV),
+      // displacing ~53% of full-energy events. See
+      // analysis/HPGeWaveformStudy/spectrum/devlogs/2026-08-05_satellite_analysis_debug.md
+      const CLHEP::Hep3Vector& worldPos = step.postPosition();
       const double stepEdep = step.ionizingEdep();
       const bool inCrystal = (detector == "HPGe") ? stepInCrystal(worldPos) : false;
 
