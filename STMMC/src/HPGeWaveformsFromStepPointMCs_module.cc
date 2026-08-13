@@ -85,6 +85,7 @@ namespace mu2e {
     };
     using Parameters = art::EDProducer::Table<Config>;
     explicit HPGeWaveformsFromStepPointMCs(const Parameters& conf);
+    ~HPGeWaveformsFromStepPointMCs() { delete noiseFFT; }
   private:
     void produce(art::Event& event) override;
     void beginJob();
@@ -217,7 +218,7 @@ namespace mu2e {
     int psdNSamples = 0;                                                                                        // FFT length N = 2*(psd.size()-1)
     std::vector<double> noiseBuffer;                                                                            // Synthesized noise [charge carriers]
     size_t noiseBufferPos = 0;                                                                                  // Next unconsumed sample in noiseBuffer
-    TVirtualFFT* noiseFFT = nullptr;                                                                            // Reusable C2R plan, owned by ROOT
+    TVirtualFFT* noiseFFT = nullptr;                                                                            // C2R plan created once in loadNoisePSD; owned by this module, deleted in destructor
 
     // Crystal rotation loaded from GeomService in beginRun.
     // Used in depositCharge() to transform world -> crystal-local coordinates.
@@ -736,7 +737,10 @@ namespace mu2e {
       if (!std::isfinite(s) || s < 0.0)
         throw cet::exception("Configuration", "NoisePSDFile contains a negative or non-finite PSD value\n");
     };
-    // Reusable complex-to-real inverse FFT plan ("K" keeps the plan; ROOT owns it)
+    // Complex-to-real inverse FFT plan, created ONCE and reused for every
+    // generateNoiseBuffer() call. "K" makes the factory return a new
+    // caller-owned instance (leaving ROOT's global kept transform alone), so
+    // this module owns it and deletes it in the destructor.
     noiseFFT = TVirtualFFT::FFT(1, &psdNSamples, "C2R ES K");
     if (noiseFFT == nullptr)
       throw cet::exception("Configuration", "TVirtualFFT C2R unavailable - ROOT FFTW plugin missing\n");
@@ -753,10 +757,11 @@ namespace mu2e {
     // variance is sum(S[k])*df with df = fs/N, i.e. the PSD integral.
     const int N = psdNSamples;
     const double fsHz = fADC * 1e6; // fADC is in MHz
-    // Re-acquire the kept plan each call: TVirtualFFT keeps one global
-    // transform, so a cached pointer could dangle if other code also uses it.
-    // With unchanged size/type this returns the existing plan (cheap).
-    noiseFFT = TVirtualFFT::FFT(1, &psdNSamples, "C2R ES K");
+    // noiseFFT is created once in loadNoisePSD and reused here. Do NOT call
+    // TVirtualFFT::FFT(..., "K") per invocation: with "K" the factory
+    // allocates a brand-new caller-owned transform on EVERY call (it never
+    // compares against or reuses the kept one), which leaks ~70 kB per call
+    // and OOM-killed million-event runs.
     // SetPointComplex takes a non-const reference, so a named lvalue is required
     TComplex c(0.0, 0.0);
     noiseFFT->SetPointComplex(0, c);
