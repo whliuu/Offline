@@ -175,7 +175,7 @@ STMDAQParameters : {
     }
 }
 HPGeDigitization : {
-    EnergyPerADCBin : 0.5 # keV/bin
+    EnergyPerADCBin : 0.375 # keV/bin; matches the measured DAQ gain (fitted 0.3736 keV/ADC from shielded Cs-137 data, 2026-02-06)
     PreamplifierNoiseSD : 0.32 # mV
     FanoFactor : 0.1 # dimensionless; Ge Fano factor at 77 K
     DecayConstant : 50 # us
