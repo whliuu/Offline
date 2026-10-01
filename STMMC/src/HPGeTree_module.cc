@@ -193,12 +193,13 @@ namespace mu2e {
 
   bool HPGeTree::stepInCrystal(const CLHEP::Hep3Vector& worldPos) const {
     // Transform the world position into crystal-local coordinates and check
-    // the cylinder envelope. We apply the inverse of the crystal rotation; if
-    // the rotation is unavailable we fall back to a fixed rotateY(+45) that
-    // matches the hardcoded values in HPGeWaveformsFromStepPointMCs.
+    // the cylinder envelope. rotation() is the G4PVPlacement frame rotation, so
+    // world -> local is rotation() * (world - origin) -- NOT its inverse (see
+    // HPGeWaveformsFromStepPointMCs::depositCharge). The fallback rotateY(+45)
+    // is the same transform.
     CLHEP::Hep3Vector local = worldPos - crystalOrigin;
     if (crystalGeomLoaded) {
-      local = crystalRotation.inverse() * local;
+      local = crystalRotation * local;
     } else {
       local.rotateY(45.0 * CLHEP::degree);
     }

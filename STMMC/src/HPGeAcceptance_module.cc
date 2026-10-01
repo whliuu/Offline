@@ -171,8 +171,10 @@ namespace mu2e {
         crystalR_ = hpge->CrystalR();
         crystalL_ = hpge->CrystalL();
         geomLoaded_ = true;
-        // Crystal axis = rotation applied to local +z
-        crystalAxis_ = crystalRotation_ * CLHEP::Hep3Vector(0, 0, 1);
+        // rotation() is the G4PVPlacement frame rotation: the crystal is oriented
+        // by its inverse, so the world axis is rotation().inverse() * local +z
+        // = (-sin45, 0, cos45), matching the default above.
+        crystalAxis_ = crystalRotation_.inverse() * CLHEP::Hep3Vector(0, 0, 1);
       }
     } catch (std::exception const& e) {
       std::cout << "HPGeAcceptance: geometry query failed, using hardcoded values" << std::endl;
@@ -184,7 +186,7 @@ namespace mu2e {
                                       double& localR_out, double& localZ_out) const {
     CLHEP::Hep3Vector local = worldPos - crystalOrigin_;
     if (geomLoaded_) {
-      local = crystalRotation_.inverse() * local;
+      local = crystalRotation_ * local;   // world -> local; see HPGeWaveformsFromStepPointMCs
     } else {
       local.rotateY(45.0 * CLHEP::degree);
     }

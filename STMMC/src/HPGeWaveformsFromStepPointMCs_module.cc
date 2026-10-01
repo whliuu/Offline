@@ -222,7 +222,7 @@ namespace mu2e {
 
     // Crystal rotation loaded from GeomService in beginRun.
     // Used in depositCharge() to transform world -> crystal-local coordinates.
-    // Falls back to rotateY(-45 deg) if GeomService is unavailable.
+    // Falls back to rotateY(+45 deg) if GeomService is unavailable.
     CLHEP::HepRotation crystalRotation_;
     bool crystalRotationLoaded_ = false;
 
@@ -521,16 +521,19 @@ namespace mu2e {
     }
 
     // Transform world position into crystal-local coordinates.
-    // Shift to crystal-centre origin, then apply inverse of the crystal rotation
-    // (rotateY(-45 deg) per GeomService) so the crystal axis points along +z.
-    // The original rotateY(+45) was wrong: it applied the forward rotation instead
-    // of the inverse, mirroring the crystal envelope relative to HPGeTree.
-    // Falls back to rotateY(-45 deg) if GeomService was unavailable in beginRun.
+    // HPGeDetector::rotation() (rotateY(+45 deg)) is the rotation handed to
+    // G4PVPlacement, which is a FRAME rotation: the crystal is oriented by its
+    // inverse (axis along (-sin45, 0, cos45) in the world) and world -> local is
+    // rotation() * (world - centre). Applying .inverse() here instead gives an
+    // axis perpendicular to the real one and rejected ~25-30% of genuine crystal
+    // deposits (2026-04-30 to 2026-10-01). Since STMDet is only the bare crystal,
+    // the out-of-bounds reject count below should be ~0.
+    // See analysis/HPGeWaveformStudy/stm_photon_source/devlogs/2026-10-01_first_gpvm_run.md
     hitPosition -= crystalCentrePosition;
     if (crystalRotationLoaded_) {
-      hitPosition = crystalRotation_.inverse() * hitPosition;
+      hitPosition = crystalRotation_ * hitPosition;
     } else {
-      hitPosition.rotateY(-45.0*CLHEP::degree);
+      hitPosition.rotateY(45.0*CLHEP::degree);   // == rotateY(+45) matrix * hitPosition
     }
     // Shift so the front face of the crystal is at z=0
     hitPosition.setZ(hitPosition.z() + (crystalL/2));
