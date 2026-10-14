@@ -85,6 +85,7 @@
 #include "Offline/Mu2eG4/inc/constructTracker.hh"
 #include "Offline/Mu2eG4/inc/constructStoppingTarget.hh"
 #include "Offline/Mu2eG4/inc/constructDummyStoppingTarget.hh"
+#include "Offline/Mu2eG4/inc/constructCosmicStopStand.hh"
 #include "Offline/Mu2eG4/inc/constructDiskCalorimeter.hh"
 #include "Offline/Mu2eG4/inc/SensitiveDetectorHelper.hh"
 #include "Offline/TrackerGeom/inc/Tracker.hh"
@@ -225,6 +226,10 @@ namespace mu2e {
     VolumeInfo targetInfo  = constructTarget();
     constructProtonAbsorber(_config);
     VolumeInfo calorimeterInfo = constructCal();
+    if ( _config.getBool("hasCosmicStopStand",false) ) {
+      constructCosmicStopStand( _helper->locateVolInfo(_config.getString("cosmicStopStand.motherVolume")),
+                                _config );
+    }
 
     // This is just placeholder for now - and might be misnamed.
     constructMagnetYoke();

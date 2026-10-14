@@ -1,0 +1,31 @@
+// Cosmic-muon stop stand: Al block + scintillator paddles upstream of the
+// tracker in the extracted (garage) position.
+// Spec: analysis/CosmicStopStudy/docs/2026-10-14-cosmic-stop-stand-design.md
+// Lengths in mm, positions in Mu2e coordinates.
+// Built only when hasCosmicStopStand = true (set by the top-level geometry).
+
+string cosmicStopStand.motherVolume   = "garageFakeDS3Vacuum";
+int    cosmicStopStand.verbosityLevel = 0;
+bool   cosmicStopStand.doSurfaceCheck = false;
+bool   cosmicStopStand.visible        = true;
+bool   cosmicStopStand.solid          = false;
+
+// Block: 10 cm Al cube; downstream face 500 mm before the first garage
+// straw plane (z = 22664), so centre z = 22664 - 500 - 50 = 22114.
+vector<double> cosmicStopStand.block.halfLengths  = { 50., 50., 50. };
+vector<double> cosmicStopStand.block.centerInMu2e = { -3904., 0., 22114. };
+string         cosmicStopStand.block.material     = "G4_Al";
+
+// Paddles: 120 x 120 mm footprint, 10 mm thick, 20 mm gaps.
+// One role per paddle (top = tag, bottom/side = veto); paddle i is the
+// volume CosmicStopPaddle_<i>.
+string         cosmicStopStand.paddle.material = "G4_PLASTIC_SC_VINYLTOLUENE";
+vector<string> cosmicStopStand.paddle.roles    = { "top", "top", "bottom" };
+vector<double> cosmicStopStand.paddle.halfLengths = {
+  60., 5., 60.,
+  60., 5., 60.,
+  60., 5., 60. };
+vector<double> cosmicStopStand.paddle.centersInMu2e = {
+  -3904.,   75., 22114.,
+  -3904.,  105., 22114.,
+  -3904.,  -75., 22114. };

@@ -23,6 +23,7 @@ cet_make_library(
       src/constructDiskCalorimeter.cc
       src/constructDS.cc
       src/constructDummyStoppingTarget.cc
+      src/constructCosmicStopStand.cc
       src/constructExternalShielding.cc
       src/constructExtMonFNALBuilding.cc
       src/constructExtMonFNALDetector.cc
