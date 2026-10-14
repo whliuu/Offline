@@ -226,10 +226,6 @@ namespace mu2e {
     VolumeInfo targetInfo  = constructTarget();
     constructProtonAbsorber(_config);
     VolumeInfo calorimeterInfo = constructCal();
-    if ( _config.getBool("hasCosmicStopStand",false) ) {
-      constructCosmicStopStand( _helper->locateVolInfo(_config.getString("cosmicStopStand.motherVolume")),
-                                _config );
-    }
 
     // This is just placeholder for now - and might be misnamed.
     constructMagnetYoke();
@@ -269,6 +265,12 @@ namespace mu2e {
     if (  const_cast<GeometryService&>(_geom).hasElement<CosmicRayShield>() ) {
       GeomHandle<CosmicRayShield> CosmicRayShieldGeomHandle;
       constructCRV(hallInfo,_config);
+    }
+
+    // placed after all other HallAir daughters except the virtual detectors so its overlap check sees them
+    if ( _config.getBool("hasCosmicStopStand",false) ) {
+      constructCosmicStopStand( _helper->locateVolInfo(_config.getString("cosmicStopStand.motherVolume")),
+                                _config );
     }
 
     constructVirtualDetectors(_config); // beware of the placement order of this function

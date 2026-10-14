@@ -4,7 +4,11 @@
 // Lengths in mm, positions in Mu2e coordinates.
 // Built only when hasCosmicStopStand = true (set by the top-level geometry).
 
-string cosmicStopStand.motherVolume   = "garageFakeDS3Vacuum";
+// In the extracted geometry garageFakeDS3Vacuum starts at z = 22339
+// (14000 + 8339), so a stand upstream of that (baseline 22054-22174) must be
+// placed in HallAir. Use "garageFakeDS3Vacuum" only for a stand fully inside
+// 22339 < z < 22539.5 (garage TrackerMother upstream edge).
+string cosmicStopStand.motherVolume   = "HallAir";
 int    cosmicStopStand.verbosityLevel = 0;
 bool   cosmicStopStand.doSurfaceCheck = false;
 bool   cosmicStopStand.visible        = true;
