@@ -120,6 +120,20 @@ cet_build_plugin(CountVirtualDetectorHits art::module
       Offline::MCDataProducts
 )
 
+cet_build_plugin(CosmicStopStandAna art::module
+    REG_SOURCE src/CosmicStopStandAna_module.cc
+    LIBRARIES REG
+      art_root_io::TFileService_service
+      Offline::CalorimeterGeom
+      Offline::ConfigTools
+      Offline::DataProducts
+      Offline::GeometryService
+      Offline::MCDataProducts
+      Offline::Mu2eUtilities
+      ROOT::Hist
+      ROOT::Tree
+)
+
 cet_build_plugin(CRYGenPlots art::module
     REG_SOURCE src/CRYGenPlots_module.cc
     LIBRARIES REG
