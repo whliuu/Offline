@@ -117,6 +117,7 @@ namespace mu2e {
     std::vector<int>   caloDisk_, caloOrigin_, caloFromEle_;
     std::vector<float> caloT_, caloE_;
     int tagPdg_ = 0, tagIsStop_ = -1;
+    float tagPTop_ = -1.f;   // tag |p| [MeV/c] at its earliest top-paddle step, -1 if none
     std::string tagEndVol_, tagEndProc_;
     std::vector<int>   stopPdg_, eleFound_;
     std::vector<float> stopT_, stopTStart_, stopPEnd_, stopX_, stopY_, stopZ_, eleP_, eleCosZ_;
@@ -152,6 +153,7 @@ namespace mu2e {
     stops_->Branch("tag_endVol", &tagEndVol_);
     stops_->Branch("tag_endProc", &tagEndProc_);
     stops_->Branch("tag_isStop", &tagIsStop_);
+    stops_->Branch("tag_pTop", &tagPTop_);
     stops_->Branch("stop_pdg", &stopPdg_);
     stops_->Branch("stop_t", &stopT_);
     stops_->Branch("stop_tStart", &stopTStart_);
@@ -292,7 +294,7 @@ namespace mu2e {
     for ( auto* v : { &padT_, &padE_, &trkT_, &trkE_, &caloT_, &caloE_, &stopT_, &stopTStart_,
                       &stopPEnd_, &stopX_, &stopY_, &stopZ_, &eleP_, &eleCosZ_ } ) v->clear();
     stopProc_.clear(); eleProc_.clear();
-    tagPdg_ = 0; tagIsStop_ = -1; tagEndVol_.clear(); tagEndProc_.clear();
+    tagPdg_ = 0; tagIsStop_ = -1; tagPTop_ = -1.f; tagEndVol_.clear(); tagEndProc_.clear();
   }
 
   void CosmicStopStandAna::analyze(art::Event const& event) {
@@ -360,6 +362,7 @@ namespace mu2e {
     //    particle with the largest top-paddle eDep, else the largest eDep in any paddle.
     RecordMap padMap, trkMap, caloMap;
     std::unordered_map<std::size_t, std::pair<double, art::Ptr<SimParticle>>> eTop, eAny;
+    std::unordered_map<std::size_t, std::pair<double, double>> pTop;   // particle key -> (earliest top step time, |p| there)
     for ( std::size_t i=0; i<roles_.size(); ++i ) {
       art::InputTag const tag(conf_.g4Tag().label(), "CosmicStopPaddle_" + std::to_string(i));
       for ( auto const& s : *event.getValidHandle<StepPointMCCollection>(tag) ) {
@@ -370,6 +373,8 @@ namespace mu2e {
         if ( roles_[i] == "top" ) {
           auto& b = eTop[s.simParticle().key()];
           b.first += s.totalEDep(); b.second = s.simParticle();
+          auto const ip = pTop.find(s.simParticle().key());
+          if ( ip == pTop.end() || s.time() < ip->second.first ) pTop[s.simParticle().key()] = { s.time(), s.momentum().mag() };
         }
       }
     }
@@ -391,6 +396,8 @@ namespace mu2e {
       tagEndProc_ = tp->stoppingCode().name();
       auto const it = stopIndex_.find(tp.key());
       tagIsStop_  = ( it == stopIndex_.end() ) ? -1 : it->second;
+      auto const ip = pTop.find(tp.key());
+      if ( ip != pTop.end() ) tagPTop_ = static_cast<float>(ip->second.second);
     }
 
     // 3) Tracker and calo records for all particles; all-event histograms.
