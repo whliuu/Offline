@@ -314,7 +314,15 @@ namespace mu2e {
       int const k = static_cast<int>(stopPdg_.size());
       stopIndex_[key.asUint()] = k;
       stopPdg_.push_back(sim.pdgId());
-      stopT_.push_back(sim.endGlobalTime());
+      // Mu2eG4 records the times of a muon decaying at rest from before the decay
+      // (Mu2eG4UserHelpers.cc), so use the latest daughter start time as the
+      // decay or capture time; fall back to the end time if there are no daughters.
+      double tDecay = sim.endGlobalTime();
+      if ( !sim.daughters().empty() ) {
+        tDecay = sim.daughters().front()->startGlobalTime();
+        for ( auto const& d : sim.daughters() ) tDecay = std::max<double>(tDecay, d->startGlobalTime());
+      }
+      stopT_.push_back(tDecay);
       stopTStart_.push_back(sim.startGlobalTime());
       stopPEnd_.push_back(sim.endMomentum().vect().mag());
       stopX_.push_back(sim.endPosition().x());
@@ -322,11 +330,15 @@ namespace mu2e {
       stopZ_.push_back(sim.endPosition().z());
       stopProc_.push_back(sim.stoppingCode().name());
 
-      // Decay electron: the most energetic e+- daughter created at the muon end time.
+      // Decay electron: the most energetic direct daughter of the right charge (mu- -> e-,
+      // mu+ -> e+) created by a decay, DIO or capture process.
+      PDGCode::type const eleType = ( sim.pdgId() > 0 ) ? PDGCode::e_minus : PDGCode::e_plus;
       art::Ptr<SimParticle> best;
       for ( auto const& d : sim.daughters() ) {
-        if ( std::abs(d->pdgId()) != PDGCode::e_minus ) continue;
-        if ( std::abs(d->startGlobalTime() - sim.endGlobalTime()) > 1. ) continue;
+        if ( d->pdgId() != eleType ) continue;
+        ProcessCode const cc = d->creationCode();
+        if ( !( cc == ProcessCode::Decay || cc == ProcessCode::DecayWithSpin ||
+                cc == ProcessCode::DIO   || cc == ProcessCode::muMinusCaptureAtRest ) ) continue;
         double const p = d->startMomentum().vect().mag();
         if ( p < conf_.minEleMomentum() ) continue;
         if ( best.isNull() || p > best->startMomentum().vect().mag() ) best = d;
@@ -344,7 +356,8 @@ namespace mu2e {
       }
     }
 
-    // 2) Paddle records; tagging particle = largest top-paddle eDep (any paddle if no top hit).
+    // 2) Paddle records; tagging particle = the muon with the largest top-paddle eDep, else the
+    //    particle with the largest top-paddle eDep, else the largest eDep in any paddle.
     RecordMap padMap, trkMap, caloMap;
     std::unordered_map<std::size_t, std::pair<double, art::Ptr<SimParticle>>> eTop, eAny;
     for ( std::size_t i=0; i<roles_.size(); ++i ) {
@@ -360,11 +373,19 @@ namespace mu2e {
         }
       }
     }
-    auto const& eSel = eTop.empty() ? eAny : eTop;
-    if ( !eSel.empty() ) {
-      auto const best = std::max_element(eSel.begin(), eSel.end(),
-                          [](auto const& a, auto const& b){ return a.second.first < b.second.first; });
-      art::Ptr<SimParticle> const& tp = best->second.second;
+    auto pick = [](auto const& m, bool muonOnly) {
+      art::Ptr<SimParticle> tp;
+      double eMax = -1.;
+      for ( auto const& kv : m ) {
+        if ( muonOnly && std::abs(kv.second.second->pdgId()) != PDGCode::mu_minus ) continue;
+        if ( kv.second.first > eMax ) { eMax = kv.second.first; tp = kv.second.second; }
+      }
+      return tp;
+    };
+    art::Ptr<SimParticle> tp = pick(eTop, true);
+    if ( tp.isNull() ) tp = pick(eTop, false);
+    if ( tp.isNull() ) tp = pick(eAny, false);
+    if ( tp.isNonnull() ) {
       tagPdg_     = tp->pdgId();
       tagEndVol_  = vi.endVolume(*tp).name();
       tagEndProc_ = tp->stoppingCode().name();
