@@ -35,7 +35,7 @@
 #include "Offline/GlobalConstantsService/inc/GlobalConstantsHandle.hh"
 #include "Offline/GlobalConstantsService/inc/ParticleDataList.hh"
 #include "Offline/RecoDataProducts/inc/STMWaveformDigi.hh"
-#include "Offline/RecoDataProducts/inc/STMMWDDigi.hh"
+#include "Offline/RecoDataProducts/inc/STMPHDigi.hh"
 #include "Offline/Mu2eUtilities/inc/STMUtils.hh"
 #include "Offline/ProditionsService/inc/ProditionsHandle.hh"
 #include "Offline/STMConditions/inc/STMEnergyCalib.hh"
@@ -53,7 +53,8 @@ namespace mu2e {
       using Name=fhicl::Name;
       using Comment=fhicl::Comment;
       struct Config {
-        fhicl::Atom<art::InputTag> stmWaveformDigisTag{ Name("stmWaveformDigisTag"), Comment("InputTag for STMWaveformDigiCollection")};
+        fhicl::OptionalAtom<art::InputTag> stmWaveformDigisMapTag{ Name("stmWaveformDigisMapTag"), Comment("InputTag for STMWaveformDigiCollectionMap (unpacked data), produces an STMPHDigiCollectionMap. Set exactly one of stmWaveformDigisMapTag and stmWaveformDigisTag")};
+        fhicl::OptionalAtom<art::InputTag> stmWaveformDigisTag{ Name("stmWaveformDigisTag"), Comment("InputTag for STMWaveformDigiCollection (MC digitization chain), produces an STMPHDigiCollection. Set exactly one of stmWaveformDigisMapTag and stmWaveformDigisTag")};
         fhicl::Atom<double> tau{Name("tau"), Comment("Decay constant of the waveform (used in the deconvolution step) [ns]")};
         fhicl::Atom<double> M{Name("M"), Comment("M parameter (number of samples to differentiate between)")};
         fhicl::Atom<double> L{Name("L"), Comment("L parameter (number of samples to average over)")};
@@ -62,11 +63,13 @@ namespace mu2e {
         fhicl::Atom<double> thresholdgrad{Name("thresholdgrad"), Comment("Threshold on gradient to cut out peaks when calculating baseline")};
         fhicl::Atom<double> defaultBaselineMean{Name("defaultBaselineMean"), Comment("Default mean to use for baseline when ZS removes all baseline data, in ADC values")};
         fhicl::Atom<double> defaultBaselineSD{Name("defaultBaselineSD"), Comment("Default standard deviation to use for baseline when ZS removes all baseline data, in ADC values")};
-        fhicl::OptionalAtom<bool> makeTTreeMWD{ Name("makeTTreeMWD"), Comment("Controls whether to make the TTree with branches ADC, deconvoluted, differentiated, averaged")};
+        fhicl::OptionalAtom<bool> makeTTreePH{ Name("makeTTreePH"), Comment("Controls whether to make the TTree with branches ADC, deconvoluted, differentiated, averaged")};
+        fhicl::OptionalAtom<bool> makeTTreeMWD{ Name("makeTTreeMWD"), Comment("Deprecated alias of makeTTreePH")};
         fhicl::OptionalAtom<bool> makeTTreeEnergies{ Name("makeTTreeEnergies"), Comment("Controls whether to make the TTree with branches time, E")};
         fhicl::OptionalAtom<double> TTreeEnergyCalib{ Name("TTreeEnergyCalib"), Comment("Controls whether to make the energy TTrees with units of energy or in ADC values. If 0, will leave as ADC value, otherwise will multiply by this calibration to generate the energy.")};
         fhicl::OptionalAtom<int> verbosityLevel{Name("verbosityLevel"), Comment("Verbosity level")};
-        fhicl::OptionalAtom<std::string> xAxis{ Name("xAxis"), Comment("Choice of x-axis unit for histograms if verbosity level >= 5: \"sample_number\", \"waveform_time\", or \"event_time\"") };
+        fhicl::OptionalAtom<std::string> xAxis{ Name("xAxis"), Comment("Choice of x-axis unit for histograms if verbosity level >= 5: \"sample_number\", \"waveform_time\", or \"event_time\"")
+        };
 
       };
       using Parameters = art::EDProducer::Table<Config>;
@@ -77,6 +80,8 @@ namespace mu2e {
     void produce(art::Event& e) override;
     void endJob();
 
+    static art::InputTag selectWaveformDigisTag(const Parameters& conf);
+    void process_waveform(const art::Event& event, const STMWaveformDigi& waveform, const STMEnergyCalib& stmEnergyCalib, STMPHDigiCollection& phDigis);
     void deconvolve();
     void differentiate();
     void average();
@@ -86,7 +91,8 @@ namespace mu2e {
 
 
     // fhicl variables
-    art::ProductToken<STMWaveformDigiCollection> _stmWaveformDigisToken;  // token of required data
+    bool useMapInput = false;                                             // true for STMWaveformDigiCollectionMap input, false for STMWaveformDigiCollection
+    art::InputTag _stmWaveformDigisTag;                                   // tag of required data
     STMChannel channel;                                                   // interface to prodicitions service
     double tau = 0.0;                                                     // decay time of waveform [ns] (used in deconvolution step)
     double M = 0.0;                                                       // M-parameter (used in differentiation step)
@@ -97,7 +103,7 @@ namespace mu2e {
     double thresholdgrad = 0.0;                                           // threshold on gradient
     double defaultBaselineMean = 0.0;
     double defaultBaselineSD = 0.0;
-    bool makeTTreeMWD = false;                                            // controls whether to make MWD process TTree
+    bool makeTTreePH = false;                                            // controls whether to make PH process TTree
     bool makeTTreeEnergies = false;                                       // controls whether to make results TTree
     int verbosityLevel = 0;                                               // std cout verbosity level
     std::string _xAxis = "";                                              // optional parameter for x-axis unit if plotting histograms
@@ -105,7 +111,7 @@ namespace mu2e {
     // Proditions service
     ProditionsHandle<STMEnergyCalib> _stmEnergyCalib_h;
 
-    // MWD analysis variables
+    // PH analysis variables
     std::vector<int16_t> ADCs;                // input waveform ADCs
     unsigned long int nADCs = 0;              // size of input data
     unsigned long int i = 0;                  // iterator
@@ -117,7 +123,7 @@ namespace mu2e {
     std::vector<double> averaged_data;
     double sum = 0.0;                         // variable part of avarege()
     int count = 0;                            // counter variable
-    int16_t mwd_energy = 0;
+    int16_t ph_energy = 0;
 
     // Peak finding variables
     double baseline_mean = 0.0;
@@ -147,8 +153,9 @@ namespace mu2e {
 
   STMMovingWindowDeconvolution::STMMovingWindowDeconvolution(const Parameters& conf) :
     art::EDProducer{conf},
-    _stmWaveformDigisToken(consumes<STMWaveformDigiCollection>(conf().stmWaveformDigisTag())),
-    channel(STMUtils::getChannel(conf().stmWaveformDigisTag())),
+    useMapInput(conf().stmWaveformDigisMapTag().has_value()),
+    _stmWaveformDigisTag(selectWaveformDigisTag(conf)),
+    channel(STMUtils::getChannel(_stmWaveformDigisTag)),
     tau(conf().tau()),
     M(conf().M()),
     L(conf().L()),
@@ -156,20 +163,27 @@ namespace mu2e {
     thresholdgrad(conf().thresholdgrad()),
     defaultBaselineMean(conf().defaultBaselineMean()),
     defaultBaselineSD(conf().defaultBaselineSD()) {
-      produces<STMMWDDigiCollection>();
+      if (useMapInput) {
+        consumes<STMWaveformDigiCollectionMap>(_stmWaveformDigisTag);
+        produces<STMPHDigiCollectionMap>();
+      }
+      else {
+        consumes<STMWaveformDigiCollection>(_stmWaveformDigisTag);
+        produces<STMPHDigiCollection>();
+      }
       if (M < L)
         throw cet::exception("Configuration", "L (" + std::to_string(L) + ") is greater than M (" + std::to_string(M) + "), reconfigure\n");
       useFixedThreshold = conf().FixedThresholdADC(fixedThresholdADC);
       if (useFixedThreshold && fixedThresholdADC <= 0.0)
         throw cet::exception("Configuration", "FixedThresholdADC must be positive, got " + std::to_string(fixedThresholdADC) + "\n");
       verbosityLevel = conf().verbosityLevel() ? *(conf().verbosityLevel()) : 0;
-      if (verbosityLevel > 10)
-        verbosityLevel = 10;
       _xAxis = conf().xAxis() ? *(conf().xAxis()) : "";
-      makeTTreeMWD = conf().makeTTreeMWD() ? *(conf().makeTTreeMWD()) : false;
+      if (conf().makeTTreePH() && conf().makeTTreeMWD())
+        throw cet::exception("Configuration", "Set only one of makeTTreePH and its deprecated alias makeTTreeMWD\n");
+      makeTTreePH = conf().makeTTreePH() ? *(conf().makeTTreePH()) : (conf().makeTTreeMWD() ? *(conf().makeTTreeMWD()) : false);
       makeTTreeEnergies = conf().makeTTreeEnergies() ? *(conf().makeTTreeEnergies()) : false;
       TTreeEnergyCalib = conf().TTreeEnergyCalib() ? *(conf().TTreeEnergyCalib()) : 1.0;
-      if (makeTTreeMWD) {
+      if (makeTTreePH) {
         art::ServiceHandle<art::TFileService> tfs;
         ttree = tfs->make<TTree>("ttree", "STMMovingWindowDeconvolution pulse finding ttree");
         ttree->Branch("ADC", &ADC, "ADC/S");
@@ -188,7 +202,7 @@ namespace mu2e {
         ttree->Branch("E", &E, "E/D");
         ttree->Branch("waveformID", &waveformID, "waveformID/i");
       };
-      if (_xAxis != "") {
+      if (_xAxis == "") {
         if (verbosityLevel >= 5) {
           throw cet::exception("STMMovingWindowDecomposition") << "No xAxis scale defined despite requesting verbosity level >= 5" << std::endl;
         };
@@ -213,10 +227,17 @@ namespace mu2e {
     };
   };
 
+  art::InputTag STMMovingWindowDeconvolution::selectWaveformDigisTag(const Parameters& conf) {
+    // Unpacked data arrives as STMWaveformDigiCollectionMap, the MC digitization chain as STMWaveformDigiCollection
+    if (conf().stmWaveformDigisMapTag().has_value() == conf().stmWaveformDigisTag().has_value())
+      throw cet::exception("Configuration", "Set exactly one of stmWaveformDigisMapTag and stmWaveformDigisTag\n");
+    return conf().stmWaveformDigisMapTag() ? *(conf().stmWaveformDigisMapTag()) : *(conf().stmWaveformDigisTag());
+  };
+
   void STMMovingWindowDeconvolution::produce(art::Event& event) {
-    // create output
-    std::unique_ptr<STMMWDDigiCollection> outputMWDDigis(new STMMWDDigiCollection);
-    auto waveformDigisHandle = event.getValidHandle(_stmWaveformDigisToken);
+    // Counter for phDigis produced
+    size_t eventPHDigiCount = 0;
+
     // get prodition
     STMEnergyCalib const& stmEnergyCalib = _stmEnergyCalib_h.get(event.id());
     pedestal = stmEnergyCalib.pedestal(channel);
@@ -226,75 +247,111 @@ namespace mu2e {
     processedEvents++;
     eventId = event.id().event();
     waveformID = 0;
-    for (STMWaveformDigi waveform : *waveformDigisHandle) {
-      // clear out data from previous waveform
-      ADCs.clear();
-      deconvolved_data.clear();
-      differentiated_data.clear();
-      averaged_data.clear();
-      peak_heights.clear();
-      peak_times.clear();
-      ADCs = waveform.adcs();
-      nADCs = ADCs.size();
-      processedWaveforms++;
-      waveformID++;
-
-      if (M > nADCs)
-        M = nADCs;
-      if (L > nADCs)
-        L = nADCs;
-
-      deconvolve();
-      differentiate();
-      average();
-      calculate_baseline();
-      find_peaks();
-
-      nPeaks = peak_heights.size();
-      foundPeaks += nPeaks;
-      if (nPeaks && verbosityLevel) // TODO - change to verbosityLevel
-        std::cout << "MWD: found " << nPeaks << " peaks in event " << event.id() << std::endl;
-      for (i = 0; i < nPeaks; ++i) {
-        mwd_energy = (peak_heights[i] < ADCMax) ? ADCMax : static_cast<int16_t>(peak_heights[i]); // When saturating the int16_t limit, deconvolution goes below the int16_t limit so the energy turns negative. This clips the energy and the limit
-        // peak_times[i] is the in-waveform sample index; offset by trigTimeOffset
-        // so the stored time is a global tick consistent with the MWD stages TTree.
-        STMMWDDigi mwd_digi(waveform.trigTimeOffset() + peak_times[i], -1 * mwd_energy); // peak_heights are negative, make them positive here
-        if (mwd_digi.energy() < -100)
-          throw cet::exception("logicError", "The peak height must be positive!");
-
-        outputMWDDigis->push_back(mwd_digi);
-        if (makeTTreeEnergies) {
-          time = mwd_digi.time();
-          E = mwd_digi.energy() * TTreeEnergyCalib;
-          ttree->Fill();
+    if (useMapInput) {
+      // create output
+      std::unique_ptr<STMPHDigiCollectionMap> outputPHDigisMap(new STMPHDigiCollectionMap);
+      auto waveformDigisMapHandle = event.getValidHandle<STMWaveformDigiCollectionMap>(_stmWaveformDigisTag);
+      for (const auto& mu2e_evt : *waveformDigisMapHandle) {
+        const auto& eventHeader = mu2e_evt.first;
+        const auto& waveforms = mu2e_evt.second;
+        STMPHDigiCollection phDigis;
+        // Now loop through the waveforms
+        for (const auto& waveform : waveforms) {
+          //Check prints --------------------------------------
+          if (verbosityLevel>=7){
+            std::cout << "event id = "<< event.id().event()<<std::endl;
+            std::cout << "waveformDigisMapHandle number of keys = " << waveformDigisMapHandle->size()<<std::endl; // Number of STMEventHeader Keys
+            std::cout << "waveformDigisMapHandle number of waveforms = " << waveforms.size()<<std::endl; // Number of Waveforms in the collection
+            std::cout << "waveform id =" << waveformID << std::endl;
+          }
+          process_waveform(event, waveform, stmEnergyCalib, phDigis);
         };
-        if (verbosityLevel > 3)
-          std::cout << "energy: " << mwd_digi.energy() << std::endl;
-      };
-
-      // Save data to TTree
-      if (makeTTreeMWD) {
-        time = waveform.trigTimeOffset();
-        for (i = 0; i < nADCs; i++) {
-          ADC = ADCs[i];
-          deconvoluted =  deconvolved_data[i];
-          differentiated = differentiated_data[i];
-          averaged = averaged_data[i];
-          ttree->Fill();
-          time++;
-        };
-      };
-
-      if (verbosityLevel >= 5)
-        make_debug_histogram(event, count, waveform, stmEnergyCalib, deconvolved_data, differentiated_data, averaged_data, baseline_mean, baseline_stddev, peak_heights, peak_times);
-      ++count;
-    };
-
-    if (verbosityLevel)
-      std::cout << "MWD: " << channel.name() << ": " << outputMWDDigis->size() << " MWD digis found" << std::endl;
-    event.put(std::move(outputMWDDigis));
+        // end of inner loop over waveforms
+        eventPHDigiCount += phDigis.size();
+        if (!phDigis.empty())
+          (*outputPHDigisMap)[eventHeader] = std::move(phDigis);
+      }
+      // end of outer loop over STMEventHeader entries
+      event.put(std::move(outputPHDigisMap));
+    }
+    else {
+      // create output
+      std::unique_ptr<STMPHDigiCollection> outputPHDigis(new STMPHDigiCollection);
+      auto waveformDigisHandle = event.getValidHandle<STMWaveformDigiCollection>(_stmWaveformDigisTag);
+      for (const auto& waveform : *waveformDigisHandle)
+        process_waveform(event, waveform, stmEnergyCalib, *outputPHDigis);
+      eventPHDigiCount = outputPHDigis->size();
+      event.put(std::move(outputPHDigis));
+    }
+    if (verbosityLevel) {
+        std::cout << "MWD: " << channel.name() << ": " << eventPHDigiCount << " PH digis found" << std::endl;
+    }
   };
 
+  void STMMovingWindowDeconvolution::process_waveform(const art::Event& event, const STMWaveformDigi& waveform, const STMEnergyCalib& stmEnergyCalib, STMPHDigiCollection& phDigis) {
+    // clear out data from previous waveform
+    ADCs.clear();
+    deconvolved_data.clear();
+    differentiated_data.clear();
+    averaged_data.clear();
+    peak_heights.clear();
+    peak_times.clear();
+    ADCs = waveform.adcs();
+    nADCs = ADCs.size();
+    processedWaveforms++;
+    waveformID++;
+
+    if (M > nADCs)
+      M = nADCs;
+    if (L > nADCs)
+      L = nADCs;
+    //if(0 == nADCs)//Maybe should skip when its empty, nADs = ADCs.size, if 0 then its empty
+    deconvolve();
+    differentiate();
+    average();
+    calculate_baseline();
+    find_peaks();
+
+    nPeaks = peak_heights.size();
+    foundPeaks += nPeaks;
+    if (nPeaks && verbosityLevel) // TODO - change to verbosityLevel
+      std::cout << "MWD: found " << nPeaks << " peaks in event " << event.id() << std::endl;
+    for (i = 0; i < nPeaks; ++i) {
+      ph_energy = (peak_heights[i] < ADCMax) ? ADCMax : static_cast<int16_t>(peak_heights[i]); // When saturating the int16_t limit, deconvolution goes below the int16_t limit so the energy turns negative. This clips the energy and the limit
+      // peak_times[i] is the in-waveform sample index; offset by trigTimeOffset
+      // so the stored time is a global tick consistent with the PH stages TTree.
+      STMPHDigi ph_digi(waveform.trigTimeOffset() + peak_times[i], -1 * ph_energy); // peak_heights are negative, make them positive here
+      if (ph_digi.energy() < -100)
+        throw cet::exception("logicError", "The peak height must be positive!");
+
+      phDigis.emplace_back(ph_digi);
+
+      if (makeTTreeEnergies) {
+        time = ph_digi.time();
+        E = ph_digi.energy() * TTreeEnergyCalib;
+        ttree->Fill();
+      };
+      if (verbosityLevel > 3)
+        std::cout << "energy: " << ph_digi.energy() << std::endl;
+    };
+
+    // Save data to TTree
+    if (makeTTreePH) {
+      time = waveform.trigTimeOffset();
+      for (i = 0; i < nADCs; i++) {
+        ADC = ADCs[i];
+        deconvoluted =  deconvolved_data[i];
+        differentiated = differentiated_data[i];
+        averaged = averaged_data[i];
+        ttree->Fill();
+        time++;
+      };
+    };
+
+    if (verbosityLevel >= 5)
+      make_debug_histogram(event, count, waveform, stmEnergyCalib, deconvolved_data, differentiated_data, averaged_data, baseline_mean, baseline_stddev, peak_heights, peak_times);
+    ++count;
+  };
 
   void STMMovingWindowDeconvolution::deconvolve() {
     if (verbosityLevel > 4) {
@@ -302,6 +359,7 @@ namespace mu2e {
       for (int16_t data : ADCs)
         std::cout << data << ", ";
       std::cout << "\n" << std::endl;
+      //      std::cout << "waveformhandle = " << waveformsDigisHandle<<std::endl; //PRINT OUT TO DIAGNOSE
     };
     deconvolved_data.push_back(ADCs[0] - pedestal);
     for(i = 1; i < nADCs; i++)
@@ -423,6 +481,31 @@ namespace mu2e {
     TH1D* h_baseline_mean_minus_stddev = tfs->make<TH1D>(("h_baseline_mean_minus_stddev"+histsuffix.str()).c_str(), "Baseline Mean - StdDev", binning.nbins(),binning.low(),binning.high());
     TH1D* h_peak_threshold = tfs->make<TH1D>(("h_peak_threshold"+histsuffix.str()).c_str(), "Threshold", binning.nbins(),binning.low(),binning.high());
 
+    // now label them
+    h_waveform->GetXaxis()->SetTitle("Sample Number");
+    h_waveform->GetYaxis()->SetTitle("ADCs");
+
+    h_deconvolved->GetXaxis()->SetTitle("Sample Number");
+    h_deconvolved->GetYaxis()->SetTitle("ADCs");
+
+    h_differentiated->GetXaxis()->SetTitle("Sample Number");
+    h_differentiated->GetYaxis()->SetTitle("ADCs");
+
+    h_averaged->GetXaxis()->SetTitle("Sample Number");
+    h_averaged->GetYaxis()->SetTitle("ADCs");
+
+    h_baseline_mean->GetXaxis()->SetTitle("Sample Number");
+    h_baseline_mean->GetYaxis()->SetTitle("ADCs");
+
+    h_baseline_mean_plus_stddev->GetXaxis()->SetTitle("Sample Number");
+    h_baseline_mean_plus_stddev->GetYaxis()->SetTitle("ADCs");
+
+    h_baseline_mean_minus_stddev->GetXaxis()->SetTitle("Sample Number");
+    h_baseline_mean_minus_stddev->GetYaxis()->SetTitle("ADCs");
+
+    h_peak_threshold->GetXaxis()->SetTitle("Sample Number");
+    h_peak_threshold->GetYaxis()->SetTitle("ADCs");
+
     for (size_t i = 0; i < deconvolved_data.size(); ++i) {
       h_waveform->SetBinContent(i+1, waveform.adcs()[i] - pedestal); // remove the pedestal
       h_deconvolved->SetBinContent(i+1, deconvolved_data[i]);
@@ -433,7 +516,12 @@ namespace mu2e {
       h_baseline_mean_minus_stddev->SetBinContent(i+1, baseline_mean - baseline_stddev);
       h_peak_threshold->SetBinContent(i+1, threshold_cut); // effective threshold: fixed or dynamic
     }
+
     TH1D* h_peaks = tfs->make<TH1D>(("h_peaks"+histsuffix.str()).c_str(), "Peaks", binning.nbins(),binning.low(),binning.high());
+
+    h_peaks->GetXaxis()->SetTitle("Sample Number");
+    h_peaks->GetYaxis()->SetTitle("ADC peak");
+
     for (size_t i_peak = 0; i_peak < peak_heights.size(); ++i_peak) {
       //      std::cout << "t = " << peak_times[i_peak] << ", E = " << peak_heights[i_peak] << std::endl;
       h_peaks->SetBinContent(peak_times[i_peak]+1, peak_heights[i_peak]);

@@ -11,6 +11,7 @@
 // art includes
 #include "art/Framework/Core/EDProducer.h"
 #include "art/Framework/Principal/Event.h"
+#include "art/Framework/Principal/SubRun.h"
 #include "art/Framework/Services/Registry/ServiceHandle.h"
 
 // exception handling
@@ -25,6 +26,7 @@
 
 // Offline includes
 #include "Offline/MCDataProducts/inc/GenParticle.hh"
+#include "Offline/MCDataProducts/inc/SpectrumConfig.hh"
 #include "Offline/DataProducts/inc/PDGCode.hh"
 #include "Offline/SeedService/inc/SeedService.hh"
 
@@ -55,6 +57,7 @@ namespace mu2e {
     using Parameters = art::EDProducer::Table<Config>;
     explicit PhotonGun(const Parameters& conf);
     virtual void produce(art::Event& event);
+    virtual void endSubRun(art::SubRun& sr) override;
   private:
     CLHEP::Hep3Vector pos_;
     CLHEP::Hep3Vector aim_;
@@ -72,6 +75,7 @@ namespace mu2e {
     eng_(createEngine(art::ServiceHandle<SeedService>()->getSeed())),
     randFlat_(eng_) {
       produces<GenParticleCollection>();
+      produces<SpectrumConfig, art::InSubRun>();
 
       const double ax = conf().aimX() ? *conf().aimX() : std::sin(45.0*CLHEP::degree);
       const double ay = conf().aimY() ? *conf().aimY() : 0.0;
@@ -127,6 +131,11 @@ namespace mu2e {
     }
     event.put(std::move(output));
   };
+
+  void PhotonGun::endSubRun(art::SubRun& sr) {
+    auto config = std::make_unique<SpectrumConfig>();
+    sr.put(std::move(config), art::fullSubRun());
+  }
 }; // end namespace mu2e
 
 DEFINE_ART_MODULE(mu2e::PhotonGun)
