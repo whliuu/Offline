@@ -36,8 +36,10 @@
 // (tolerance 1e-3 mm, see guardTolerance), otherwise a cet::exception("GEOM")
 // is thrown.
 //
-// Volume names: CosmicStopBlock (target) and CosmicStopPaddle_<i> (i = index
-// in roles). Sensitive-detector, region and analysis code depend on them.
+// Volume names: CosmicStopBlock (target) and CosmicStopPaddle<i> (i = index
+// in roles). Sensitive-detector, region and analysis code depend on them; a
+// sensitive volume's name is its StepPointMC instance name, which art allows
+// to contain only letters and digits.
 //
 // The mother must not be rotated with respect to Mu2e coordinates.
 //
@@ -200,7 +202,7 @@ namespace mu2e {
 
     for ( size_t i=0; i<nPaddles; ++i ) {
       StandBox p;
-      p.name   = "CosmicStopPaddle_" + to_string(i);
+      p.name   = "CosmicStopPaddle" + to_string(i);
       p.role   = roles[i];
       p.half   = vector<double>( padHalf.begin()+3*i, padHalf.begin()+3*i+3 );
       p.center = targetPos

@@ -4,7 +4,7 @@
 // the tree contract is Task 3 of CosmicStopStudy/docs/2026-10-20-full-sim-plan.md).
 //
 // Cosmic muons stop in an Al target (volume CosmicStopBlock) tagged by
-// scintillator paddles (CosmicStopPaddle_<i>), upstream of the extracted
+// scintillator paddles (CosmicStopPaddle<i>), upstream of the extracted
 // (garage-position) tracker and calorimeter, field off. For each event the
 // module turns the Geant4 truth of g4Tag (StepPointMCs, SimParticles) into
 // compact records:
@@ -237,7 +237,7 @@ namespace mu2e {
     Config conf_;
     Keep   keep_;
 
-    std::vector<art::InputTag> paddleTags_;   // g4Tag label, instance CosmicStopPaddle_<i>
+    std::vector<art::InputTag> paddleTags_;   // g4Tag label, instance CosmicStopPaddle<i>
     bool runSeen_    = false;
     bool geomFilled_ = false;
 
@@ -452,7 +452,7 @@ namespace mu2e {
 
     paddleTags_.clear();
     for ( std::size_t i=0; i<meta_.roles.size(); ++i ) {
-      paddleTags_.emplace_back(conf_.g4Tag().label(), "CosmicStopPaddle_" + std::to_string(i));
+      paddleTags_.emplace_back(conf_.g4Tag().label(), "CosmicStopPaddle" + std::to_string(i));
     }
   }
 
@@ -575,7 +575,7 @@ namespace mu2e {
     addStandVolume("CosmicStopBlock", c0, &meta_.targetHalf[0]);
     for ( std::size_t i=0; i<meta_.roles.size(); ++i ) {
       CLHEP::Hep3Vector const off(meta_.paddleOffset[3*i], meta_.paddleOffset[3*i+1], meta_.paddleOffset[3*i+2]);
-      addStandVolume("CosmicStopPaddle_" + std::to_string(i), c0 + R*off, &meta_.paddleHalf[3*i]);
+      addStandVolume("CosmicStopPaddle" + std::to_string(i), c0 + R*off, &meta_.paddleHalf[3*i]);
     }
     geo_.tiltDeg = meta_.tiltDeg;
 
