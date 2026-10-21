@@ -32,8 +32,9 @@
 // nestBox/finishNesting) takes the FRAME rotation, so R.inverse() is passed.
 //
 // Clearance guard: the most downstream corner of any stand volume must be at
-// least minClearanceToTracker upstream of the TrackerMother upstream face,
-// otherwise a cet::exception("GEOM") is thrown.
+// least minClearanceToTracker upstream of the TrackerMother upstream face
+// (tolerance 1e-3 mm, see guardTolerance), otherwise a cet::exception("GEOM")
+// is thrown.
 //
 // Volume names: CosmicStopBlock (target) and CosmicStopPaddle_<i> (i = index
 // in roles). Sensitive-detector, region and analysis code depend on them.
@@ -43,7 +44,9 @@
 
 // C++ includes
 #include <algorithm>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -141,12 +144,19 @@ namespace mu2e {
     bool const isSolid             = config.getBool("cosmicStopStand.solid",false);
     int  const verbosity           = config.getInt("cosmicStopStand.verbosityLevel",0);
 
+    // Lengths are printed in fixed notation with 4 decimals (0.1 um) via local
+    // ostringstreams, so cout's own format state is never changed.
+    int const printDecimals = 4;
+
     if ( verbosity > 0 ) {
       G4ThreeVector pMin, pMax;
       mother.solid->BoundingLimits(pMin, pMax);
-      cout << "constructCosmicStopStand: mother " << mother.name
-           << " extent in Mu2e " << mother.centerInMu2e() + pMin
-           << " to " << mother.centerInMu2e() + pMax << " mm" << endl;
+      ostringstream os;
+      os << fixed << setprecision(printDecimals);
+      os << "constructCosmicStopStand: mother " << mother.name
+         << " extent in Mu2e " << mother.centerInMu2e() + pMin
+         << " to " << mother.centerInMu2e() + pMax << " mm\n";
+      cout << os.str() << flush;
     }
 
     // ---- Read and validate the configuration.
@@ -213,26 +223,37 @@ namespace mu2e {
     }
     double const zmaxStand = boxes[iMax].hi.z();
 
+    // Presets are written with 6 decimals and the TrackerMother centre is a
+    // computed value, so allow 1 um; a real misplacement is far larger.
+    double const guardTolerance = 1e-3; // mm
+
     if ( verbosity > 0 ) {
-      cout << "constructCosmicStopStand: tilt " << tiltDeg << " deg about +x, "
-           << nPaddles << " paddles, mother " << mother.name << endl;
+      ostringstream os;
+      os << fixed << setprecision(printDecimals);
+      os << "constructCosmicStopStand: tilt " << tiltDeg << " deg about +x, "
+         << nPaddles << " paddles, mother " << mother.name << "\n";
       for ( auto const& b : boxes ) {
-        cout << "constructCosmicStopStand: " << b.name << " (" << b.role
-             << ") center in Mu2e " << b.center
-             << " mm, Mu2e bounding box " << b.lo << " to " << b.hi << " mm" << endl;
+        os << "constructCosmicStopStand: " << b.name << " (" << b.role
+           << ") center in Mu2e " << b.center
+           << " mm, Mu2e bounding box " << b.lo << " to " << b.hi << " mm\n";
       }
-      cout << "constructCosmicStopStand: TrackerMother upstream face z = " << trackerFaceZ
-           << " mm, stand max z = " << zmaxStand << " mm (" << boxes[iMax].name
-           << "), gap = " << trackerFaceZ - zmaxStand
-           << " mm, required >= " << minClearance << " mm" << endl;
+      os << "constructCosmicStopStand: TrackerMother upstream face z = " << trackerFaceZ
+         << " mm, stand max z = " << zmaxStand << " mm (" << boxes[iMax].name
+         << "), gap = " << trackerFaceZ - zmaxStand
+         << " mm, required >= " << minClearance << " mm (tolerance "
+         << guardTolerance << " mm)\n";
+      cout << os.str() << flush;
     }
 
-    if ( zmaxStand > trackerFaceZ - minClearance + 1e-6 ) {
-      throw cet::exception("GEOM")
-        << "constructCosmicStopStand: stand reaches z = " << zmaxStand << " mm ("
-        << boxes[iMax].name << "), TrackerMother upstream face is at z = " << trackerFaceZ
-        << " mm; gap " << trackerFaceZ - zmaxStand
-        << " mm is below cosmicStopStand.minClearanceToTracker = " << minClearance << " mm\n";
+    if ( zmaxStand > trackerFaceZ - minClearance + guardTolerance ) {
+      ostringstream os;
+      os << fixed << setprecision(printDecimals);
+      os << "constructCosmicStopStand: stand reaches z = " << zmaxStand << " mm ("
+         << boxes[iMax].name << "), TrackerMother upstream face is at z = " << trackerFaceZ
+         << " mm; gap " << trackerFaceZ - zmaxStand
+         << " mm is below cosmicStopStand.minClearanceToTracker = " << minClearance
+         << " mm (tolerance " << guardTolerance << " mm)\n";
+      throw cet::exception("GEOM") << os.str();
     }
 
     // ---- Placement. One shared frame rotation (inverse of R), none at zero tilt.
