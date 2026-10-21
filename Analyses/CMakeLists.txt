@@ -126,10 +126,13 @@ cet_build_plugin(CosmicStopStandAna art::module
       art_root_io::TFileService_service
       Offline::CalorimeterGeom
       Offline::ConfigTools
+      Offline::CosmicRayShieldGeom
       Offline::DataProducts
       Offline::GeometryService
       Offline::MCDataProducts
       Offline::Mu2eUtilities
+      Offline::TrackerGeom
+      CLHEP::CLHEP
       ROOT::Hist
       ROOT::Tree
 )

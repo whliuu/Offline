@@ -1,18 +1,54 @@
 //
-// Truth dumper for the cosmic-muon stop stand study
-// (analysis/CosmicStopStudy/docs/2026-10-14-cosmic-stop-stand-design.md).
+// Truth dumper for the cosmic-muon stop stand full simulation
+// (analysis repo: CosmicStopStudy/docs/2026-10-20-full-sim-design.md, section 4.5;
+// the tree contract is Task 3 of CosmicStopStudy/docs/2026-10-20-full-sim-plan.md).
 //
-// For each event with a paddle step or a muon ending in the stand block it
-// writes hit records for the paddles, tracker and calorimeter, each tagged
-// with its origin (which block stop it descends from, and whether it comes
-// from that stop's decay electron), plus truth for each block stop.
-// Every event fills the all-event histograms; every subrun fills the subrun
-// tree with the cosmic livetime when the generator provides one.
+// Cosmic muons stop in an Al target (volume CosmicStopBlock) tagged by
+// scintillator paddles (CosmicStopPaddle_<i>), upstream of the extracted
+// (garage-position) tracker and calorimeter, field off. For each event the
+// module turns the Geant4 truth of g4Tag (StepPointMCs, SimParticles) into
+// compact records:
+//
+//   - paddle records  (paddle,  paddleBinNs bin, origin): earliest t, summed E
+//   - straw records   (straw,   trkBinNs bin,    origin): earliest t, summed E,
+//                                                         E-weighted position
+//   - crystal records (crystal, caloBinNs bin,   origin): same as straws
+//   - CRV records     (bar,     crvBinNs bin)           : earliest t, summed E
+//   - generator truth (GenParticles of genTag)
+//   - stops: muons whose end volume is targetName, each with its decay electron
+//
+// Origin of a record: "stop" = index of the stop the depositing particle
+// descends from (SimParticle parent chain), -1 if none; "fromEle" = 1 if it
+// descends from that stop's decay electron. Record times are global G4 times
+// [ns], energies [MeV], positions [mm] in Mu2e coordinates (StepPointMC
+// positions already are, garage shift included).
+//
+// Output, in the TFileService directory named after the module label:
+//   TTree events    one entry per kept event (parameter keep)
+//   TTree subruns   one entry per subrun: event counters, CosmicLivetime
+//   TTree meta      one entry per job: metaJson and the cosmicStopStand keys
+//   TTree geometry  one entry per job: straws, crystals, CRV bars, stand
+//                   volumes, Mu2e origin in the G4 world, garage z offset;
+//                   all positions in Mu2e coordinates where Mu2eG4 places
+//                   the volumes (for the extracted geometry the garage
+//                   position is already in the tracker/calo keys, so
+//                   garage_z_offset is information, not a shift to apply)
+//   TH1D  hTrkPlanes, TH1D hCaloE, TH2D hTrkCalo: every event with good G4
+//         status, kept or not (overflow is put in the last bin)
+//
+// Events with StatusG4::status() > 9 are counted in n_g4bad and skipped.
+//
+// The geometry tree is filled in beginRun when WorldG4 is already there (in
+// a Mu2eG4 job the g4run beginRun on the trigger path runs first), else on
+// the first event, else in endJob; if WorldG4 never exists (no Mu2eG4 in the
+// job) mu2e_origin_in_world is written as three NaNs.
 //
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <map>
 #include <set>
 #include <string>
@@ -32,20 +68,34 @@
 #include "canvas/Utilities/InputTag.h"
 #include "cetlib_except/exception.h"
 #include "fhiclcpp/types/Atom.h"
+#include "messagefacility/MessageLogger/MessageLogger.h"
+
+#include "CLHEP/Units/SystemOfUnits.h"
+#include "CLHEP/Vector/RotationX.h"
+#include "CLHEP/Vector/ThreeVector.h"
 
 #include "Offline/CalorimeterGeom/inc/Calorimeter.hh"
 #include "Offline/ConfigTools/inc/SimpleConfig.hh"
+#include "Offline/CosmicRayShieldGeom/inc/CosmicRayShield.hh"
+#include "Offline/CosmicRayShieldGeom/inc/CRSScintillatorBar.hh"
 #include "Offline/DataProducts/inc/PDGCode.hh"
+#include "Offline/DataProducts/inc/StrawId.hh"
+#include "Offline/GeometryService/inc/DetectorSystem.hh"
 #include "Offline/GeometryService/inc/GeomHandle.hh"
 #include "Offline/GeometryService/inc/GeometryService.hh"
+#include "Offline/GeometryService/inc/WorldG4.hh"
 #include "Offline/MCDataProducts/inc/CosmicLivetime.hh"
 #include "Offline/MCDataProducts/inc/GenParticle.hh"
 #include "Offline/MCDataProducts/inc/PhysicalVolumeInfoMultiCollection.hh"
+#include "Offline/MCDataProducts/inc/ProcessCode.hh"
 #include "Offline/MCDataProducts/inc/SimParticle.hh"
+#include "Offline/MCDataProducts/inc/StatusG4.hh"
 #include "Offline/MCDataProducts/inc/StepPointMC.hh"
 #include "Offline/Mu2eUtilities/inc/PhysicalVolumeMultiHelper.hh"
+#include "Offline/TrackerGeom/inc/Tracker.hh"
 
 #include "TH1D.h"
+#include "TH2D.h"
 #include "TTree.h"
 
 namespace mu2e {
@@ -55,14 +105,26 @@ namespace mu2e {
     struct Config {
       using Name    = fhicl::Name;
       using Comment = fhicl::Comment;
-      fhicl::Atom<art::InputTag> g4Tag{ Name("g4Tag"), Comment("Mu2eG4 module label"), art::InputTag("g4run") };
-      fhicl::Atom<art::InputTag> genTag{ Name("genTag"), Comment("GenParticles for genOnly mode"), art::InputTag("generate") };
-      fhicl::Atom<art::InputTag> livetimeTag{ Name("livetimeTag"), Comment("SubRun CosmicLivetime"), art::InputTag("generate") };
-      fhicl::Atom<bool>   genOnly{ Name("genOnly"), Comment("Only count generated muons crossing the top paddle plane"), false };
+      fhicl::Atom<art::InputTag> g4Tag{ Name("g4Tag"),
+          Comment("Mu2eG4 module label: StepPointMCs, SimParticles, StatusG4, volume info"),
+          art::InputTag("g4run") };
+      fhicl::Atom<art::InputTag> genTag{ Name("genTag"), Comment("GenParticleCollection"),
+          art::InputTag("generate") };
+      fhicl::Atom<art::InputTag> livetimeTag{ Name("livetimeTag"),
+          Comment("SubRun CosmicLivetime (CRY); livetime_s = -1 when absent"),
+          art::InputTag("generate") };
+      fhicl::Atom<std::string> keep{ Name("keep"),
+          Comment("Events written to the events tree: all, stopOrPaddle, paddle, detector, detectorOrPaddle") };
       fhicl::Atom<double> paddleBinNs{ Name("paddleBinNs"), Comment("Paddle record time bin [ns]"), 5. };
-      fhicl::Atom<double> trkBinNs{ Name("trkBinNs"), Comment("Tracker record time bin [ns]"), 50. };
-      fhicl::Atom<double> caloBinNs{ Name("caloBinNs"), Comment("Calo record time bin [ns]"), 50. };
-      fhicl::Atom<double> minEleMomentum{ Name("minEleMomentum"), Comment("Decay electron minimum |p| [MeV/c]"), 1. };
+      fhicl::Atom<double> trkBinNs{ Name("trkBinNs"), Comment("Straw record time bin [ns]"), 50. };
+      fhicl::Atom<double> caloBinNs{ Name("caloBinNs"), Comment("Crystal record time bin [ns]"), 50. };
+      fhicl::Atom<double> crvBinNs{ Name("crvBinNs"), Comment("CRV bar record time bin [ns]"), 50. };
+      fhicl::Atom<double> minEleMomentum{ Name("minEleMomentum"),
+          Comment("Decay electron minimum |p| [MeV/c]"), 1. };
+      fhicl::Atom<std::string> targetName{ Name("targetName"),
+          Comment("End volume that defines a stop"), "CosmicStopBlock" };
+      fhicl::Atom<std::string> metaJson{ Name("metaJson"),
+          Comment("Job description, copied to the meta tree"), "{}" };
     };
     using Parameters = art::EDAnalyzer::Table<Config>;
 
@@ -72,163 +134,431 @@ namespace mu2e {
     void beginSubRun(art::SubRun const& sr) override;
     void endSubRun(art::SubRun const& sr) override;
     void analyze(art::Event const& event) override;
+    void endJob() override;
 
   private:
+    enum class Keep { all, stopOrPaddle, paddle, detector, detectorOrPaddle };
+    static Keep parseKeep(std::string const& s);
+
+    // Which stop a particle descends from, and whether via its decay electron.
     struct Origin { int stop = -1; int fromEle = 0; };
-    // (detector index, time bin, origin stop, fromEle) -> (earliest time, summed energy)
-    using RecordMap = std::map<std::tuple<int,long,int,int>, std::pair<float,float>>;
+
+    // One aggregated record: earliest time, summed energy, sum of E * position.
+    struct Record {
+      double t = 0.;
+      double e = 0.;
+      CLHEP::Hep3Vector ePos;
+    };
+    // (detector index, time bin, origin stop, fromEle) -> record
+    using RecordKey = std::tuple<int,long,int,int>;
+    using RecordMap = std::map<RecordKey, Record>;
+    static void addRecord(RecordMap& m, int det, StepPointMC const& s, double binNs, Origin const& o);
+
+    // Branch buffers of the events tree.
+    struct EventCols {
+      int run = 0, subrun = 0, event = 0;
+      int tagPdg = 0, tagIsStop = -1;
+      float tagPTop = -1.f;   // tag |p| [MeV/c] at its earliest top-paddle step, -1 if none
+      std::string tagEndVol, tagEndProc;
+      std::vector<int>   padIdx, padOrigin, padFromEle;
+      std::vector<float> padT, padE;
+      std::vector<int>   trkPlane, trkPanel, trkStraw, trkOrigin, trkFromEle;
+      std::vector<float> trkT, trkE, trkX, trkY, trkZ;
+      std::vector<int>   caloCrystal, caloDisk, caloOrigin, caloFromEle;
+      std::vector<float> caloT, caloE, caloX, caloY, caloZ;
+      std::vector<int>   crvBar;
+      std::vector<float> crvT, crvE;
+      std::vector<int>   genPdg;
+      std::vector<float> genP, genX, genY, genZ, genUx, genUy, genUz;
+      std::vector<int>   stopPdg;
+      std::vector<float> stopT, stopTStart, stopPEnd, stopX, stopY, stopZ;
+      std::vector<std::string> stopProc, stopStartVol;
+      std::vector<int>   eleFound;
+      std::vector<float> eleP, eleCosZ;
+      std::vector<std::string> eleProc;
+      void clear();
+    };
+
+    // Branch buffers of the subruns tree.
+    struct SubrunCols {
+      int run = 0, subrun = 0, nEvents = 0, nKept = 0, nG4Bad = 0;
+      double livetime = -1.;
+    };
+
+    // Branch buffers of the meta tree (the cosmicStopStand.* keys).
+    struct MetaCols {
+      std::string json;
+      std::vector<std::string> roles;
+      std::vector<double> targetHalf, targetCenter, paddleHalf, paddleOffset;
+      double tiltDeg = 0.;
+    };
+
+    // Branch buffers of the geometry tree.
+    struct GeomCols {
+      std::vector<int>    strawPlane, strawPanel, strawStraw;
+      std::vector<double> strawMidX, strawMidY, strawMidZ, strawDirX, strawDirY, strawDirZ, strawHalfLen;
+      std::vector<int>    crystalId, crystalDisk;
+      std::vector<double> crystalX, crystalY, crystalZ, crystalHxy, crystalHz;
+      std::vector<int>    crvBar;
+      std::vector<double> crvX, crvY, crvZ, crvHx, crvHy, crvHz;
+      std::vector<std::string> volName;
+      std::vector<double> volX, volY, volZ, volHx, volHy, volHz;
+      double tiltDeg = 0.;
+      std::vector<double> mu2eOriginInWorld;
+      double garageZOffset = 0.;
+    };
+
+    void readStandConfig();
+    void fillGeometry();
+    void addStandVolume(std::string const& name, CLHEP::Hep3Vector const& center, double const* half);
 
     Origin origin(art::Ptr<SimParticle> p);
-    static void addRecord(RecordMap& m, int det, double t, double e, double binNs, Origin const& o);
-    static void flush(RecordMap const& m, std::vector<int>& det, std::vector<float>& t,
-                      std::vector<float>& e, std::vector<int>& org, std::vector<int>& fromEle);
-    void countGenCrossings(art::Event const& event);
+    static bool isDecayOrCapture(ProcessCode const& cc);
+    void findStops(SimParticleCollection const& sims, PhysicalVolumeMultiHelper const& vi);
+    void paddleRecords(art::Event const& event, PhysicalVolumeMultiHelper const& vi, RecordMap& padMap);
+    void detectorRecords(art::Event const& event, RecordMap& trkMap, RecordMap& caloMap,
+                         RecordMap& crvMap, std::set<int>& planes, double& caloE);
+    bool keepEvent(bool hasStop, bool hasPaddle, bool hasDetector) const;
+    void flushRecords(RecordMap const& padMap, RecordMap const& trkMap,
+                      RecordMap const& caloMap, RecordMap const& crvMap);
+    void fillGenTruth(art::Event const& event);
     void clearEvent();
 
     Config conf_;
-    std::string const blockName_ = "CosmicStopBlock";
+    Keep   keep_;
 
-    // Stand geometry, read from the GeometryService config in beginRun.
-    std::vector<std::string> roles_;
-    std::vector<double> blockHalf_, blockCenter_, padHalf_, padCenter_;
-    double topY_ = 0., topXmin_ = 0., topXmax_ = 0., topZmin_ = 0., topZmax_ = 0.;
-    bool metaFilled_ = false;
+    std::vector<art::InputTag> paddleTags_;   // g4Tag label, instance CosmicStopPaddle_<i>
+    bool runSeen_    = false;
+    bool geomFilled_ = false;
 
     // Per-event lookup tables.
     std::unordered_map<std::size_t,int>    stopIndex_;   // muon key -> stop index
     std::unordered_map<std::size_t,int>    eleIndex_;    // electron key -> stop index
     std::unordered_map<std::size_t,Origin> originCache_;
 
-    // Subrun counters.
-    unsigned long long nEvents_ = 0, nGenCross_ = 0;
-    double livetime_ = -1.;
+    EventCols  ev_;
+    SubrunCols sr_;
+    MetaCols   meta_;
+    GeomCols   geo_;
 
-    TTree* stops_   = nullptr;
-    TTree* subruns_ = nullptr;
-    TTree* meta_    = nullptr;
-    TH1D*  hAllTrkPlanes_ = nullptr;
-    TH1D*  hAllCaloE_     = nullptr;
-
-    unsigned run_ = 0, subrun_ = 0, event_ = 0;
-    std::vector<int>   padIdx_, padOrigin_, padFromEle_;
-    std::vector<float> padT_, padE_;
-    std::vector<int>   trkPlane_, trkOrigin_, trkFromEle_;
-    std::vector<float> trkT_, trkE_;
-    std::vector<int>   caloDisk_, caloOrigin_, caloFromEle_;
-    std::vector<float> caloT_, caloE_;
-    int tagPdg_ = 0, tagIsStop_ = -1;
-    float tagPTop_ = -1.f;   // tag |p| [MeV/c] at its earliest top-paddle step, -1 if none
-    std::string tagEndVol_, tagEndProc_;
-    std::vector<int>   stopPdg_, eleFound_;
-    std::vector<float> stopT_, stopTStart_, stopPEnd_, stopX_, stopY_, stopZ_, eleP_, eleCosZ_;
-    std::vector<std::string> stopProc_, eleProc_;
-    std::string blockNameBranch_ = "CosmicStopBlock";
+    TTree* eventsTree_   = nullptr;
+    TTree* subrunsTree_  = nullptr;
+    TTree* metaTree_     = nullptr;
+    TTree* geometryTree_ = nullptr;
+    TH1D*  hTrkPlanes_   = nullptr;
+    TH1D*  hCaloE_       = nullptr;
+    TH2D*  hTrkCalo_     = nullptr;
   };
 
+  //================================================================
   CosmicStopStandAna::CosmicStopStandAna(Parameters const& conf)
-    : art::EDAnalyzer(conf), conf_(conf()) {
+    : art::EDAnalyzer(conf), conf_(conf()), keep_(parseKeep(conf().keep())) {
+
+    for ( double const b : { conf_.paddleBinNs(), conf_.trkBinNs(), conf_.caloBinNs(), conf_.crvBinNs() } ) {
+      if ( !(b > 0.) ) {
+        throw cet::exception("CONFIG") << "CosmicStopStandAna: record time bins must be > 0 ns, got " << b << "\n";
+      }
+    }
 
     art::ServiceHandle<art::TFileService> tfs;
 
-    stops_ = tfs->make<TTree>("stops", "Cosmic stop stand: hit records and block stops");
-    stops_->Branch("run", &run_);
-    stops_->Branch("subrun", &subrun_);
-    stops_->Branch("event", &event_);
-    stops_->Branch("pad_idx", &padIdx_);
-    stops_->Branch("pad_t", &padT_);
-    stops_->Branch("pad_e", &padE_);
-    stops_->Branch("pad_origin", &padOrigin_);
-    stops_->Branch("pad_fromEle", &padFromEle_);
-    stops_->Branch("trk_plane", &trkPlane_);
-    stops_->Branch("trk_t", &trkT_);
-    stops_->Branch("trk_e", &trkE_);
-    stops_->Branch("trk_origin", &trkOrigin_);
-    stops_->Branch("trk_fromEle", &trkFromEle_);
-    stops_->Branch("calo_disk", &caloDisk_);
-    stops_->Branch("calo_t", &caloT_);
-    stops_->Branch("calo_e", &caloE_);
-    stops_->Branch("calo_origin", &caloOrigin_);
-    stops_->Branch("calo_fromEle", &caloFromEle_);
-    stops_->Branch("tag_pdg", &tagPdg_);
-    stops_->Branch("tag_endVol", &tagEndVol_);
-    stops_->Branch("tag_endProc", &tagEndProc_);
-    stops_->Branch("tag_isStop", &tagIsStop_);
-    stops_->Branch("tag_pTop", &tagPTop_);
-    stops_->Branch("stop_pdg", &stopPdg_);
-    stops_->Branch("stop_t", &stopT_);
-    stops_->Branch("stop_tStart", &stopTStart_);
-    stops_->Branch("stop_pEnd", &stopPEnd_);
-    stops_->Branch("stop_x", &stopX_);
-    stops_->Branch("stop_y", &stopY_);
-    stops_->Branch("stop_z", &stopZ_);
-    stops_->Branch("stop_proc", &stopProc_);
-    stops_->Branch("ele_found", &eleFound_);
-    stops_->Branch("ele_p", &eleP_);
-    stops_->Branch("ele_cosz", &eleCosZ_);
-    stops_->Branch("ele_proc", &eleProc_);
+    eventsTree_ = tfs->make<TTree>("events", "Cosmic stop stand: records, generator truth and stops");
+    eventsTree_->Branch("run",          &ev_.run);
+    eventsTree_->Branch("subrun",       &ev_.subrun);
+    eventsTree_->Branch("event",        &ev_.event);
+    eventsTree_->Branch("tag_pdg",      &ev_.tagPdg);
+    eventsTree_->Branch("tag_endVol",   &ev_.tagEndVol);
+    eventsTree_->Branch("tag_endProc",  &ev_.tagEndProc);
+    eventsTree_->Branch("tag_isStop",   &ev_.tagIsStop);
+    eventsTree_->Branch("tag_pTop",     &ev_.tagPTop);
+    eventsTree_->Branch("pad_idx",      &ev_.padIdx);
+    eventsTree_->Branch("pad_t",        &ev_.padT);
+    eventsTree_->Branch("pad_e",        &ev_.padE);
+    eventsTree_->Branch("pad_origin",   &ev_.padOrigin);
+    eventsTree_->Branch("pad_fromEle",  &ev_.padFromEle);
+    eventsTree_->Branch("trk_plane",    &ev_.trkPlane);
+    eventsTree_->Branch("trk_panel",    &ev_.trkPanel);
+    eventsTree_->Branch("trk_straw",    &ev_.trkStraw);
+    eventsTree_->Branch("trk_t",        &ev_.trkT);
+    eventsTree_->Branch("trk_e",        &ev_.trkE);
+    eventsTree_->Branch("trk_x",        &ev_.trkX);
+    eventsTree_->Branch("trk_y",        &ev_.trkY);
+    eventsTree_->Branch("trk_z",        &ev_.trkZ);
+    eventsTree_->Branch("trk_origin",   &ev_.trkOrigin);
+    eventsTree_->Branch("trk_fromEle",  &ev_.trkFromEle);
+    eventsTree_->Branch("calo_crystal", &ev_.caloCrystal);
+    eventsTree_->Branch("calo_disk",    &ev_.caloDisk);
+    eventsTree_->Branch("calo_t",       &ev_.caloT);
+    eventsTree_->Branch("calo_e",       &ev_.caloE);
+    eventsTree_->Branch("calo_x",       &ev_.caloX);
+    eventsTree_->Branch("calo_y",       &ev_.caloY);
+    eventsTree_->Branch("calo_z",       &ev_.caloZ);
+    eventsTree_->Branch("calo_origin",  &ev_.caloOrigin);
+    eventsTree_->Branch("calo_fromEle", &ev_.caloFromEle);
+    eventsTree_->Branch("crv_bar",      &ev_.crvBar);
+    eventsTree_->Branch("crv_t",        &ev_.crvT);
+    eventsTree_->Branch("crv_e",        &ev_.crvE);
+    eventsTree_->Branch("gen_pdg",      &ev_.genPdg);
+    eventsTree_->Branch("gen_p",        &ev_.genP);
+    eventsTree_->Branch("gen_x",        &ev_.genX);
+    eventsTree_->Branch("gen_y",        &ev_.genY);
+    eventsTree_->Branch("gen_z",        &ev_.genZ);
+    eventsTree_->Branch("gen_ux",       &ev_.genUx);
+    eventsTree_->Branch("gen_uy",       &ev_.genUy);
+    eventsTree_->Branch("gen_uz",       &ev_.genUz);
+    eventsTree_->Branch("stop_pdg",     &ev_.stopPdg);
+    eventsTree_->Branch("stop_t",       &ev_.stopT);
+    eventsTree_->Branch("stop_tStart",  &ev_.stopTStart);
+    eventsTree_->Branch("stop_pEnd",    &ev_.stopPEnd);
+    eventsTree_->Branch("stop_x",       &ev_.stopX);
+    eventsTree_->Branch("stop_y",       &ev_.stopY);
+    eventsTree_->Branch("stop_z",       &ev_.stopZ);
+    eventsTree_->Branch("stop_proc",    &ev_.stopProc);
+    eventsTree_->Branch("stop_startVol",&ev_.stopStartVol);
+    eventsTree_->Branch("ele_found",    &ev_.eleFound);
+    eventsTree_->Branch("ele_p",        &ev_.eleP);
+    eventsTree_->Branch("ele_cosz",     &ev_.eleCosZ);
+    eventsTree_->Branch("ele_proc",     &ev_.eleProc);
 
-    subruns_ = tfs->make<TTree>("subruns", "Per-subrun livetime and counters");
-    subruns_->Branch("run", &run_);
-    subruns_->Branch("subrun", &subrun_);
-    subruns_->Branch("livetime_s", &livetime_);
-    subruns_->Branch("n_events", &nEvents_);
-    subruns_->Branch("n_gen_cross", &nGenCross_);
+    subrunsTree_ = tfs->make<TTree>("subruns", "Per-subrun event counters and livetime");
+    subrunsTree_->Branch("run",        &sr_.run);
+    subrunsTree_->Branch("subrun",     &sr_.subrun);
+    subrunsTree_->Branch("n_events",   &sr_.nEvents);
+    subrunsTree_->Branch("n_kept",     &sr_.nKept);
+    subrunsTree_->Branch("n_g4bad",    &sr_.nG4Bad);
+    subrunsTree_->Branch("livetime_s", &sr_.livetime);
 
-    meta_ = tfs->make<TTree>("meta", "Stand geometry");
-    meta_->Branch("block_name", &blockNameBranch_);
-    meta_->Branch("paddle_roles", &roles_);
-    meta_->Branch("block_half", &blockHalf_);
-    meta_->Branch("block_center", &blockCenter_);
-    meta_->Branch("paddle_half", &padHalf_);
-    meta_->Branch("paddle_center", &padCenter_);
+    metaTree_ = tfs->make<TTree>("meta", "Job description and stand keys");
+    metaTree_->Branch("json",          &meta_.json);
+    metaTree_->Branch("roles",         &meta_.roles);
+    metaTree_->Branch("target_half",   &meta_.targetHalf);
+    metaTree_->Branch("target_center", &meta_.targetCenter);
+    metaTree_->Branch("paddle_half",   &meta_.paddleHalf);
+    metaTree_->Branch("paddle_offset", &meta_.paddleOffset);
+    metaTree_->Branch("tilt_deg",      &meta_.tiltDeg);
 
-    hAllTrkPlanes_ = tfs->make<TH1D>("hAllTrkPlanes", "Distinct straw planes hit, all events;planes;events", 38, -0.5, 37.5);
-    hAllCaloE_     = tfs->make<TH1D>("hAllCaloE", "Total calo crystal energy, all events;E [MeV];events", 1000, 0., 1000.);
+    geometryTree_ = tfs->make<TTree>("geometry", "Straws, crystals, CRV bars and stand volumes in Mu2e coordinates");
+    geometryTree_->Branch("straw_plane",          &geo_.strawPlane);
+    geometryTree_->Branch("straw_panel",          &geo_.strawPanel);
+    geometryTree_->Branch("straw_straw",          &geo_.strawStraw);
+    geometryTree_->Branch("straw_mid_x",          &geo_.strawMidX);
+    geometryTree_->Branch("straw_mid_y",          &geo_.strawMidY);
+    geometryTree_->Branch("straw_mid_z",          &geo_.strawMidZ);
+    geometryTree_->Branch("straw_dir_x",          &geo_.strawDirX);
+    geometryTree_->Branch("straw_dir_y",          &geo_.strawDirY);
+    geometryTree_->Branch("straw_dir_z",          &geo_.strawDirZ);
+    geometryTree_->Branch("straw_halflen",        &geo_.strawHalfLen);
+    geometryTree_->Branch("crystal_id",           &geo_.crystalId);
+    geometryTree_->Branch("crystal_disk",         &geo_.crystalDisk);
+    geometryTree_->Branch("crystal_x",            &geo_.crystalX);
+    geometryTree_->Branch("crystal_y",            &geo_.crystalY);
+    geometryTree_->Branch("crystal_z",            &geo_.crystalZ);
+    geometryTree_->Branch("crystal_hxy",          &geo_.crystalHxy);
+    geometryTree_->Branch("crystal_hz",           &geo_.crystalHz);
+    geometryTree_->Branch("crv_bar",              &geo_.crvBar);
+    geometryTree_->Branch("crv_x",                &geo_.crvX);
+    geometryTree_->Branch("crv_y",                &geo_.crvY);
+    geometryTree_->Branch("crv_z",                &geo_.crvZ);
+    geometryTree_->Branch("crv_hx",               &geo_.crvHx);
+    geometryTree_->Branch("crv_hy",               &geo_.crvHy);
+    geometryTree_->Branch("crv_hz",               &geo_.crvHz);
+    geometryTree_->Branch("vol_name",             &geo_.volName);
+    geometryTree_->Branch("vol_x",                &geo_.volX);
+    geometryTree_->Branch("vol_y",                &geo_.volY);
+    geometryTree_->Branch("vol_z",                &geo_.volZ);
+    geometryTree_->Branch("vol_hx",               &geo_.volHx);
+    geometryTree_->Branch("vol_hy",               &geo_.volHy);
+    geometryTree_->Branch("vol_hz",               &geo_.volHz);
+    geometryTree_->Branch("tilt_deg",             &geo_.tiltDeg);
+    geometryTree_->Branch("mu2e_origin_in_world", &geo_.mu2eOriginInWorld);
+    geometryTree_->Branch("garage_z_offset",      &geo_.garageZOffset);
+
+    hTrkPlanes_ = tfs->make<TH1D>("hTrkPlanes",
+        "Distinct straw planes with energy, every good event;planes;events", 38, -0.5, 37.5);
+    hCaloE_     = tfs->make<TH1D>("hCaloE",
+        "Total crystal energy, every good event;E [MeV];events", 1000, 0., 1000.);
+    hTrkCalo_   = tfs->make<TH2D>("hTrkCalo",
+        "Planes vs total crystal energy, every good event;planes;E [MeV]", 38, -0.5, 37.5, 1000, 0., 1000.);
   }
 
-  void CosmicStopStandAna::beginRun(art::Run const&) {
-    if ( metaFilled_ ) return;
-    SimpleConfig const& c = art::ServiceHandle<GeometryService>()->config();
-    c.getVectorString("cosmicStopStand.paddle.roles", roles_);
-    c.getVectorDouble("cosmicStopStand.block.halfLengths",   blockHalf_,   3);
-    c.getVectorDouble("cosmicStopStand.block.centerInMu2e",  blockCenter_, 3);
-    c.getVectorDouble("cosmicStopStand.paddle.halfLengths",   padHalf_,   3*roles_.size());
-    c.getVectorDouble("cosmicStopStand.paddle.centersInMu2e", padCenter_, 3*roles_.size());
+  //================================================================
+  CosmicStopStandAna::Keep CosmicStopStandAna::parseKeep(std::string const& s) {
+    if ( s == "all" )              return Keep::all;
+    if ( s == "stopOrPaddle" )     return Keep::stopOrPaddle;
+    if ( s == "paddle" )           return Keep::paddle;
+    if ( s == "detector" )         return Keep::detector;
+    if ( s == "detectorOrPaddle" ) return Keep::detectorOrPaddle;
+    throw cet::exception("CONFIG") << "CosmicStopStandAna: keep = '" << s
+                                   << "', must be one of all, stopOrPaddle, paddle, detector, detectorOrPaddle\n";
+  }
 
-    // Top face and x-z footprint of the highest top paddle, for genOnly crossings.
-    bool found = false;
-    for ( std::size_t i=0; i<roles_.size(); ++i ) {
-      if ( roles_[i] != "top" ) continue;
-      double const yTop = padCenter_[3*i+1] + padHalf_[3*i+1];
-      if ( !found || yTop > topY_ ) {
-        found    = true;
-        topY_    = yTop;
-        topXmin_ = padCenter_[3*i]   - padHalf_[3*i];
-        topXmax_ = padCenter_[3*i]   + padHalf_[3*i];
-        topZmin_ = padCenter_[3*i+2] - padHalf_[3*i+2];
-        topZmax_ = padCenter_[3*i+2] + padHalf_[3*i+2];
-      }
+  //================================================================
+  // Run, subrun and job transitions.
+
+  void CosmicStopStandAna::beginRun(art::Run const&) {
+    if ( !runSeen_ ) {
+      readStandConfig();
+      metaTree_->Fill();
+      runSeen_ = true;
     }
-    if ( !found ) {
-      throw cet::exception("CONFIG") << "CosmicStopStandAna: no paddle with role 'top'\n";
-    }
-    meta_->Fill();
-    metaFilled_ = true;
+    if ( !geomFilled_ && art::ServiceHandle<GeometryService>()->hasElement<WorldG4>() ) fillGeometry();
   }
 
   void CosmicStopStandAna::beginSubRun(art::SubRun const&) {
-    nEvents_   = 0;
-    nGenCross_ = 0;
+    sr_ = SubrunCols();
   }
 
   void CosmicStopStandAna::endSubRun(art::SubRun const& sr) {
-    run_      = sr.run();
-    subrun_   = sr.subRun();
-    livetime_ = -1.;
+    sr_.run      = static_cast<int>(sr.run());
+    sr_.subrun   = static_cast<int>(sr.subRun());
+    sr_.livetime = -1.;
     auto const lh = sr.getHandle<CosmicLivetime>(conf_.livetimeTag());
-    if ( lh.isValid() ) livetime_ = lh->liveTime();
-    subruns_->Fill();
+    if ( lh.isValid() ) sr_.livetime = lh->liveTime();
+    subrunsTree_->Fill();
   }
+
+  void CosmicStopStandAna::endJob() {
+    // Only for a job that saw a run but no event and no WorldG4 at beginRun.
+    if ( runSeen_ && !geomFilled_ ) fillGeometry();
+  }
+
+  //================================================================
+  // Stand keys (meta tree) and the geometry tree.
+
+  void CosmicStopStandAna::readStandConfig() {
+    SimpleConfig const& c = art::ServiceHandle<GeometryService>()->config();
+    meta_.json = conf_.metaJson();
+    c.getVectorString("cosmicStopStand.paddle.roles", meta_.roles);
+    int const n3 = 3*static_cast<int>(meta_.roles.size());
+    c.getVectorDouble("cosmicStopStand.target.halfLengths",     meta_.targetHalf,   3);
+    c.getVectorDouble("cosmicStopStand.target.centerInMu2e",    meta_.targetCenter, 3);
+    c.getVectorDouble("cosmicStopStand.paddle.halfLengths",     meta_.paddleHalf,   n3);
+    c.getVectorDouble("cosmicStopStand.paddle.offsetsInTarget", meta_.paddleOffset, n3);
+    meta_.tiltDeg = c.getDouble("cosmicStopStand.tiltDeg");
+
+    paddleTags_.clear();
+    for ( std::size_t i=0; i<meta_.roles.size(); ++i ) {
+      paddleTags_.emplace_back(conf_.g4Tag().label(), "CosmicStopPaddle_" + std::to_string(i));
+    }
+  }
+
+  void CosmicStopStandAna::addStandVolume(std::string const& name, CLHEP::Hep3Vector const& center,
+                                          double const* half) {
+    geo_.volName.push_back(name);
+    geo_.volX.push_back(center.x());
+    geo_.volY.push_back(center.y());
+    geo_.volZ.push_back(center.z());
+    geo_.volHx.push_back(half[0]);
+    geo_.volHy.push_back(half[1]);
+    geo_.volHz.push_back(half[2]);
+  }
+
+  void CosmicStopStandAna::fillGeometry() {
+    art::ServiceHandle<GeometryService> geom;
+    SimpleConfig const& c = geom->config();
+
+    // Garage position. garage.zOffset (constructDS.cc) moves only the DS
+    // volumes (garageFakeDS3Vacuum). The extracted geometry moves the tracker
+    // and calorimeter with their own keys (geom_common_extracted_v04.txt:
+    // mu2e.detectorSystemZ0, tracker.z0, tracker.mother.z0 = 24171/24175,
+    // calorimeter.caloMotherZ0/Z1), and Mu2eG4 places TrackerMother and
+    // CalorimeterMother at those Mu2e positions inside the shifted DS3 volume.
+    // So the geometry objects below are already where Mu2eG4 puts them and no
+    // shift is added; garage_z_offset is recorded for information only.
+    geo_.garageZOffset = c.getBool("inGaragePosition", false) ? c.getDouble("garage.zOffset") : 0.;
+
+    // Straws: every straw of every existing plane (Mu2eG4 skips the others).
+    // Straw positions are in the detector (tracker) frame; DetectorSystem maps
+    // them to Mu2e, as StrawSD does for the G4 hits.
+    if ( geom->hasElement<Tracker>() ) {
+      Tracker const& tracker = *GeomHandle<Tracker>();
+      GeomHandle<DetectorSystem> det;
+      for ( Straw const& straw : tracker.straws() ) {
+        StrawId const& id = straw.id();
+        if ( !id.valid() || straw.halfLength() <= 0. || !tracker.planeExists(id) ) continue;
+        CLHEP::Hep3Vector const mid = det->toMu2e(straw.getMidPoint());
+        CLHEP::Hep3Vector const& dir = straw.getDirection();
+        geo_.strawPlane.push_back(id.plane());
+        geo_.strawPanel.push_back(id.panel());
+        geo_.strawStraw.push_back(id.straw());
+        geo_.strawMidX.push_back(mid.x());
+        geo_.strawMidY.push_back(mid.y());
+        geo_.strawMidZ.push_back(mid.z());
+        geo_.strawDirX.push_back(dir.x());
+        geo_.strawDirY.push_back(dir.y());
+        geo_.strawDirZ.push_back(dir.z());
+        geo_.strawHalfLen.push_back(straw.halfLength());
+      }
+    }
+
+    // Crystals: Crystal::localPosition() is the centre of the crystal front face
+    // in the disk frame (DiskCalorimeterMaker: diskOriginToCrystalOrigin), with
+    // the crystal along +z of the disk; the centre is half a crystal length
+    // further, mapped to Mu2e by the disk-to-Mu2e transform.
+    if ( geom->hasElement<Calorimeter>() ) {
+      Calorimeter const& cal = *GeomHandle<Calorimeter>();
+      double const hxy = 0.5*cal.G4Info().get<double>("crystalXYLength");
+      double const hz  = 0.5*cal.G4Info().get<double>("crystalZLength");
+      for ( unsigned i=0; i<cal.nCrystals(); ++i ) {
+        Crystal const& cr = cal.crystal(i);
+        CLHEP::Hep3Vector const ctr =
+          cal.diskToMu2e(cr.diskID(), cr.localPosition() + CLHEP::Hep3Vector(0., 0., hz));
+        geo_.crystalId.push_back(static_cast<int>(cr.ID()));
+        geo_.crystalDisk.push_back(static_cast<int>(cr.diskID()));
+        geo_.crystalX.push_back(ctr.x());
+        geo_.crystalY.push_back(ctr.y());
+        geo_.crystalZ.push_back(ctr.z());
+        geo_.crystalHxy.push_back(hxy);
+        geo_.crystalHz.push_back(hz);
+      }
+    }
+
+    // CRV bars: centre in Mu2e and half lengths along Mu2e x, y, z (the bars
+    // are placed unrotated, CosmicRayShieldMaker/constructCRV).
+    if ( geom->hasElement<CosmicRayShield>() ) {
+      CosmicRayShield const& crs = *GeomHandle<CosmicRayShield>();
+      for ( auto const& bp : crs.getAllCRSScintillatorBars() ) {
+        CRSScintillatorBar const& bar = *bp;
+        CLHEP::Hep3Vector const& pos = bar.getPosition();
+        std::vector<double> const& half = bar.getHalfLengths();
+        geo_.crvBar.push_back(bar.index().asInt());
+        geo_.crvX.push_back(pos.x());
+        geo_.crvY.push_back(pos.y());
+        geo_.crvZ.push_back(pos.z());
+        geo_.crvHx.push_back(half.at(0));
+        geo_.crvHy.push_back(half.at(1));
+        geo_.crvHz.push_back(half.at(2));
+      }
+    }
+
+    // Stand volumes, as placed by constructCosmicStopStand.cc: R is the active
+    // rotation by +tiltDeg about +x (target frame -> Mu2e), paddle i is centred
+    // at target centre + R * offset_i. Half lengths are in the target frame.
+    CLHEP::HepRotationX const R(meta_.tiltDeg*CLHEP::deg);
+    CLHEP::Hep3Vector const c0(meta_.targetCenter[0], meta_.targetCenter[1], meta_.targetCenter[2]);
+    addStandVolume("CosmicStopBlock", c0, &meta_.targetHalf[0]);
+    for ( std::size_t i=0; i<meta_.roles.size(); ++i ) {
+      CLHEP::Hep3Vector const off(meta_.paddleOffset[3*i], meta_.paddleOffset[3*i+1], meta_.paddleOffset[3*i+2]);
+      addStandVolume("CosmicStopPaddle_" + std::to_string(i), c0 + R*off, &meta_.paddleHalf[3*i]);
+    }
+    geo_.tiltDeg = meta_.tiltDeg;
+
+    if ( geom->hasElement<WorldG4>() ) {
+      CLHEP::Hep3Vector const& o = GeomHandle<WorldG4>()->mu2eOriginInWorld();
+      geo_.mu2eOriginInWorld = { o.x(), o.y(), o.z() };
+    } else {
+      double const nan = std::numeric_limits<double>::quiet_NaN();
+      geo_.mu2eOriginInWorld = { nan, nan, nan };
+      mf::LogWarning("CosmicStopStandAna") << "WorldG4 not available (no Mu2eG4 in this job?): "
+                                           << "mu2e_origin_in_world written as NaN\n";
+    }
+
+    geometryTree_->Fill();
+    geomFilled_ = true;
+  }
+
+  //================================================================
+  // Records and origins.
 
   CosmicStopStandAna::Origin CosmicStopStandAna::origin(art::Ptr<SimParticle> p) {
     std::size_t const k0 = p.key();
@@ -249,73 +579,34 @@ namespace mu2e {
     return o;
   }
 
-  void CosmicStopStandAna::addRecord(RecordMap& m, int det, double t, double e, double binNs, Origin const& o) {
+  void CosmicStopStandAna::addRecord(RecordMap& m, int det, StepPointMC const& s, double binNs, Origin const& o) {
+    double const t = s.time();
+    double const e = s.totalEDep();
     long const bin = static_cast<long>(std::floor(t / binNs));
-    auto const key = std::make_tuple(det, bin, o.stop, o.fromEle);
-    auto it = m.find(key);
-    if ( it == m.end() ) {
-      m.emplace(key, std::make_pair(static_cast<float>(t), static_cast<float>(e)));
-    } else {
-      it->second.first   = std::min(it->second.first, static_cast<float>(t));
-      it->second.second += static_cast<float>(e);
-    }
+    auto const [it, inserted] = m.try_emplace(RecordKey(det, bin, o.stop, o.fromEle));
+    Record& r = it->second;
+    if ( inserted || t < r.t ) r.t = t;
+    r.e    += e;
+    r.ePos += e*s.position();
   }
 
-  void CosmicStopStandAna::flush(RecordMap const& m, std::vector<int>& det, std::vector<float>& t,
-                                 std::vector<float>& e, std::vector<int>& org, std::vector<int>& fromEle) {
-    for ( auto const& [key, val] : m ) {
-      det.push_back(std::get<0>(key));
-      org.push_back(std::get<2>(key));
-      fromEle.push_back(std::get<3>(key));
-      t.push_back(val.first);
-      e.push_back(val.second);
-    }
+  // Creation codes accepted for the decay electron: the old set (Decay,
+  // DecayWithSpin, DIO, muMinusCaptureAtRest) widened to every code whose
+  // name contains "Decay".
+  bool CosmicStopStandAna::isDecayOrCapture(ProcessCode const& cc) {
+    if ( cc == ProcessCode::DIO || cc == ProcessCode::muMinusCaptureAtRest ) return true;
+    return cc.name().find("Decay") != std::string::npos;
   }
 
-  void CosmicStopStandAna::countGenCrossings(art::Event const& event) {
-    auto const& gens = *event.getValidHandle<GenParticleCollection>(conf_.genTag());
-    for ( auto const& g : gens ) {
-      if ( std::abs(g.pdgId()) != PDGCode::mu_minus ) continue;
-      CLHEP::Hep3Vector const& x0 = g.position();
-      CLHEP::Hep3Vector const  u  = g.momentum().vect().unit();
-      if ( u.y() >= 0. ) continue;
-      double const s = (topY_ - x0.y()) / u.y();
-      if ( s < 0. ) continue;
-      double const x = x0.x() + s*u.x();
-      double const z = x0.z() + s*u.z();
-      if ( x >= topXmin_ && x <= topXmax_ && z >= topZmin_ && z <= topZmax_ ) ++nGenCross_;
-    }
-  }
-
-  void CosmicStopStandAna::clearEvent() {
-    stopIndex_.clear(); eleIndex_.clear(); originCache_.clear();
-    for ( auto* v : { &padIdx_, &padOrigin_, &padFromEle_, &trkPlane_, &trkOrigin_, &trkFromEle_,
-                      &caloDisk_, &caloOrigin_, &caloFromEle_, &stopPdg_, &eleFound_ } ) v->clear();
-    for ( auto* v : { &padT_, &padE_, &trkT_, &trkE_, &caloT_, &caloE_, &stopT_, &stopTStart_,
-                      &stopPEnd_, &stopX_, &stopY_, &stopZ_, &eleP_, &eleCosZ_ } ) v->clear();
-    stopProc_.clear(); eleProc_.clear();
-    tagPdg_ = 0; tagIsStop_ = -1; tagPTop_ = -1.f; tagEndVol_.clear(); tagEndProc_.clear();
-  }
-
-  void CosmicStopStandAna::analyze(art::Event const& event) {
-    ++nEvents_;
-    if ( conf_.genOnly() ) { countGenCrossings(event); return; }
-
-    clearEvent();
-    run_ = event.run(); subrun_ = event.subRun(); event_ = event.event();
-
-    auto const& pvh = event.getSubRun().getValidHandle<PhysicalVolumeInfoMultiCollection>(conf_.g4Tag());
-    PhysicalVolumeMultiHelper vi(&*pvh);
-    auto const& sims = *event.getValidHandle<SimParticleCollection>(conf_.g4Tag());
-
-    // 1) Muons that end in the block, and their decay electrons.
+  // Muons that end in targetName, and their decay electrons.
+  void CosmicStopStandAna::findStops(SimParticleCollection const& sims, PhysicalVolumeMultiHelper const& vi) {
     for ( auto const& [key, sim] : sims ) {
       if ( std::abs(sim.pdgId()) != PDGCode::mu_minus ) continue;
       if ( !sim.endDefined() ) continue;
-      if ( vi.endVolume(sim).name() != blockName_ ) continue;
-      int const k = static_cast<int>(stopPdg_.size());
+      if ( vi.endVolume(sim).name() != conf_.targetName() ) continue;
+      int const k = static_cast<int>(ev_.stopPdg.size());
       stopIndex_[key.asUint()] = k;
-      stopPdg_.push_back(sim.pdgId());
+      ev_.stopPdg.push_back(sim.pdgId());
       // Mu2eG4 records the times of a muon decaying at rest from before the decay
       // (Mu2eG4UserHelpers.cc), so use the latest daughter start time as the
       // decay or capture time; fall back to the end time if there are no daughters.
@@ -324,57 +615,60 @@ namespace mu2e {
         tDecay = sim.daughters().front()->startGlobalTime();
         for ( auto const& d : sim.daughters() ) tDecay = std::max<double>(tDecay, d->startGlobalTime());
       }
-      stopT_.push_back(tDecay);
-      stopTStart_.push_back(sim.startGlobalTime());
-      stopPEnd_.push_back(sim.endMomentum().vect().mag());
-      stopX_.push_back(sim.endPosition().x());
-      stopY_.push_back(sim.endPosition().y());
-      stopZ_.push_back(sim.endPosition().z());
-      stopProc_.push_back(sim.stoppingCode().name());
+      ev_.stopT.push_back(tDecay);
+      ev_.stopTStart.push_back(sim.startGlobalTime());
+      ev_.stopPEnd.push_back(sim.endMomentum().vect().mag());
+      ev_.stopX.push_back(sim.endPosition().x());
+      ev_.stopY.push_back(sim.endPosition().y());
+      ev_.stopZ.push_back(sim.endPosition().z());
+      ev_.stopProc.push_back(sim.stoppingCode().name());
+      ev_.stopStartVol.push_back(vi.startVolume(sim).name());
 
-      // Decay electron: the most energetic direct daughter of the right charge (mu- -> e-,
-      // mu+ -> e+) created by a decay, DIO or capture process.
+      // Decay electron: the highest-|p| direct daughter of the right charge
+      // (mu- -> e-, mu+ -> e+) from a decay or capture process, |p| >= minEleMomentum.
       PDGCode::type const eleType = ( sim.pdgId() > 0 ) ? PDGCode::e_minus : PDGCode::e_plus;
       art::Ptr<SimParticle> best;
       for ( auto const& d : sim.daughters() ) {
         if ( d->pdgId() != eleType ) continue;
-        ProcessCode const cc = d->creationCode();
-        if ( !( cc == ProcessCode::Decay || cc == ProcessCode::DecayWithSpin ||
-                cc == ProcessCode::DIO   || cc == ProcessCode::muMinusCaptureAtRest ) ) continue;
+        if ( !isDecayOrCapture(d->creationCode()) ) continue;
         double const p = d->startMomentum().vect().mag();
         if ( p < conf_.minEleMomentum() ) continue;
         if ( best.isNull() || p > best->startMomentum().vect().mag() ) best = d;
       }
-      eleFound_.push_back(best.isNonnull() ? 1 : 0);
+      ev_.eleFound.push_back(best.isNonnull() ? 1 : 0);
       if ( best.isNonnull() ) {
         eleIndex_[best.key()] = k;
-        eleP_.push_back(best->startMomentum().vect().mag());
-        eleCosZ_.push_back(best->startMomentum().vect().cosTheta());
-        eleProc_.push_back(best->creationCode().name());
+        ev_.eleP.push_back(best->startMomentum().vect().mag());
+        ev_.eleCosZ.push_back(best->startMomentum().vect().cosTheta());
+        ev_.eleProc.push_back(best->creationCode().name());
       } else {
-        eleP_.push_back(-1.f);
-        eleCosZ_.push_back(-2.f);
-        eleProc_.push_back("");
+        ev_.eleP.push_back(-1.f);
+        ev_.eleCosZ.push_back(-2.f);
+        ev_.eleProc.push_back("");
       }
     }
+  }
 
-    // 2) Paddle records; tagging particle = the muon with the largest top-paddle eDep, else the
-    //    particle with the largest top-paddle eDep, else the largest eDep in any paddle.
-    RecordMap padMap, trkMap, caloMap;
+  // Paddle records; tagging particle = the muon with the largest top-paddle eDep,
+  // else the particle with the largest top-paddle eDep, else the largest eDep in
+  // any paddle.
+  void CosmicStopStandAna::paddleRecords(art::Event const& event, PhysicalVolumeMultiHelper const& vi,
+                                         RecordMap& padMap) {
     std::unordered_map<std::size_t, std::pair<double, art::Ptr<SimParticle>>> eTop, eAny;
-    std::unordered_map<std::size_t, std::pair<double, double>> pTop;   // particle key -> (earliest top step time, |p| there)
-    for ( std::size_t i=0; i<roles_.size(); ++i ) {
-      art::InputTag const tag(conf_.g4Tag().label(), "CosmicStopPaddle_" + std::to_string(i));
-      for ( auto const& s : *event.getValidHandle<StepPointMCCollection>(tag) ) {
+    std::unordered_map<std::size_t, std::pair<double, double>> pTop;   // key -> (earliest top step time, |p| there)
+    for ( std::size_t i=0; i<paddleTags_.size(); ++i ) {
+      for ( auto const& s : *event.getValidHandle<StepPointMCCollection>(paddleTags_[i]) ) {
         if ( s.totalEDep() <= 0. ) continue;
-        addRecord(padMap, static_cast<int>(i), s.time(), s.totalEDep(), conf_.paddleBinNs(), origin(s.simParticle()));
+        addRecord(padMap, static_cast<int>(i), s, conf_.paddleBinNs(), origin(s.simParticle()));
         auto& a = eAny[s.simParticle().key()];
         a.first += s.totalEDep(); a.second = s.simParticle();
-        if ( roles_[i] == "top" ) {
+        if ( meta_.roles[i] == "top" ) {
           auto& b = eTop[s.simParticle().key()];
           b.first += s.totalEDep(); b.second = s.simParticle();
           auto const ip = pTop.find(s.simParticle().key());
-          if ( ip == pTop.end() || s.time() < ip->second.first ) pTop[s.simParticle().key()] = { s.time(), s.momentum().mag() };
+          if ( ip == pTop.end() || s.time() < ip->second.first ) {
+            pTop[s.simParticle().key()] = { s.time(), s.momentum().mag() };
+          }
         }
       }
     }
@@ -391,41 +685,184 @@ namespace mu2e {
     if ( tp.isNull() ) tp = pick(eTop, false);
     if ( tp.isNull() ) tp = pick(eAny, false);
     if ( tp.isNonnull() ) {
-      tagPdg_     = tp->pdgId();
-      tagEndVol_  = vi.endVolume(*tp).name();
-      tagEndProc_ = tp->stoppingCode().name();
+      ev_.tagPdg     = tp->pdgId();
+      ev_.tagEndVol  = vi.endVolume(*tp).name();
+      ev_.tagEndProc = tp->stoppingCode().name();
       auto const it = stopIndex_.find(tp.key());
-      tagIsStop_  = ( it == stopIndex_.end() ) ? -1 : it->second;
+      ev_.tagIsStop  = ( it == stopIndex_.end() ) ? -1 : it->second;
       auto const ip = pTop.find(tp.key());
-      if ( ip != pTop.end() ) tagPTop_ = static_cast<float>(ip->second.second);
+      if ( ip != pTop.end() ) ev_.tagPTop = static_cast<float>(ip->second.second);
+    }
+  }
+
+  // Straw, crystal and CRV records for all particles, plus the inputs of the
+  // all-event histograms (distinct planes with energy, total crystal energy).
+  void CosmicStopStandAna::detectorRecords(art::Event const& event, RecordMap& trkMap, RecordMap& caloMap,
+                                           RecordMap& crvMap, std::set<int>& planes, double& caloE) {
+    std::string const& g4 = conf_.g4Tag().label();
+
+    for ( auto const& s : *event.getValidHandle<StepPointMCCollection>(art::InputTag(g4, "tracker")) ) {
+      if ( s.totalEDep() <= 0. ) continue;
+      StrawId const sid = s.strawId();
+      planes.insert(sid.plane());
+      addRecord(trkMap, sid.asUint16(), s, conf_.trkBinNs(), origin(s.simParticle()));
     }
 
-    // 3) Tracker and calo records for all particles; all-event histograms.
-    std::set<int> allPlanes;
-    art::InputTag const trkTag(conf_.g4Tag().label(), "tracker");
-    for ( auto const& s : *event.getValidHandle<StepPointMCCollection>(trkTag) ) {
-      if ( s.totalEDep() <= 0. ) continue;
-      int const plane = s.strawId().plane();
-      allPlanes.insert(plane);
-      addRecord(trkMap, plane, s.time(), s.totalEDep(), conf_.trkBinNs(), origin(s.simParticle()));
+    auto const& caloSteps = *event.getValidHandle<StepPointMCCollection>(art::InputTag(g4, "calorimeter"));
+    if ( !caloSteps.empty() ) {
+      GeomHandle<Calorimeter> cal;
+      for ( auto const& s : caloSteps ) {
+        if ( s.totalEDep() <= 0. ) continue;
+        int const id = static_cast<int>(cal->crystal(s.volumeId()).ID());
+        caloE += s.totalEDep();
+        addRecord(caloMap, id, s, conf_.caloBinNs(), origin(s.simParticle()));
+      }
     }
-    GeomHandle<Calorimeter> cal;
-    double allCaloE = 0.;
-    art::InputTag const caloTag(conf_.g4Tag().label(), "calorimeter");
-    for ( auto const& s : *event.getValidHandle<StepPointMCCollection>(caloTag) ) {
-      if ( s.totalEDep() <= 0. ) continue;
-      int const disk = cal->crystal(s.volumeId()).diskID();
-      allCaloE += s.totalEDep();
-      addRecord(caloMap, disk, s.time(), s.totalEDep(), conf_.caloBinNs(), origin(s.simParticle()));
-    }
-    hAllTrkPlanes_->Fill(allPlanes.size());
-    hAllCaloE_->Fill(allCaloE);
 
-    if ( padMap.empty() && stopPdg_.empty() ) return;
-    flush(padMap,  padIdx_,   padT_,  padE_,  padOrigin_,  padFromEle_);
-    flush(trkMap,  trkPlane_, trkT_,  trkE_,  trkOrigin_,  trkFromEle_);
-    flush(caloMap, caloDisk_, caloT_, caloE_, caloOrigin_, caloFromEle_);
-    stops_->Fill();
+    for ( auto const& s : *event.getValidHandle<StepPointMCCollection>(art::InputTag(g4, "CRV")) ) {
+      if ( s.totalEDep() <= 0. ) continue;
+      addRecord(crvMap, s.barIndex().asInt(), s, conf_.crvBinNs(), Origin());
+    }
+  }
+
+  bool CosmicStopStandAna::keepEvent(bool hasStop, bool hasPaddle, bool hasDetector) const {
+    switch ( keep_ ) {
+    case Keep::all:              return true;
+    case Keep::stopOrPaddle:     return hasStop || hasPaddle;
+    case Keep::paddle:           return hasPaddle;
+    case Keep::detector:         return hasDetector;
+    case Keep::detectorOrPaddle: return hasDetector || hasPaddle;
+    }
+    return true;
+  }
+
+  void CosmicStopStandAna::flushRecords(RecordMap const& padMap, RecordMap const& trkMap,
+                                        RecordMap const& caloMap, RecordMap const& crvMap) {
+    for ( auto const& [key, r] : padMap ) {
+      ev_.padIdx.push_back(std::get<0>(key));
+      ev_.padOrigin.push_back(std::get<2>(key));
+      ev_.padFromEle.push_back(std::get<3>(key));
+      ev_.padT.push_back(r.t);
+      ev_.padE.push_back(r.e);
+    }
+
+    for ( auto const& [key, r] : trkMap ) {
+      StrawId const sid(static_cast<uint16_t>(std::get<0>(key)));
+      CLHEP::Hep3Vector const x = r.ePos/r.e;
+      ev_.trkPlane.push_back(sid.plane());
+      ev_.trkPanel.push_back(sid.panel());
+      ev_.trkStraw.push_back(sid.straw());
+      ev_.trkOrigin.push_back(std::get<2>(key));
+      ev_.trkFromEle.push_back(std::get<3>(key));
+      ev_.trkT.push_back(r.t);
+      ev_.trkE.push_back(r.e);
+      ev_.trkX.push_back(x.x());
+      ev_.trkY.push_back(x.y());
+      ev_.trkZ.push_back(x.z());
+    }
+
+    if ( !caloMap.empty() ) {
+      GeomHandle<Calorimeter> cal;
+      for ( auto const& [key, r] : caloMap ) {
+        int const id = std::get<0>(key);
+        CLHEP::Hep3Vector const x = r.ePos/r.e;
+        ev_.caloCrystal.push_back(id);
+        ev_.caloDisk.push_back(static_cast<int>(cal->crystal(id).diskID()));
+        ev_.caloOrigin.push_back(std::get<2>(key));
+        ev_.caloFromEle.push_back(std::get<3>(key));
+        ev_.caloT.push_back(r.t);
+        ev_.caloE.push_back(r.e);
+        ev_.caloX.push_back(x.x());
+        ev_.caloY.push_back(x.y());
+        ev_.caloZ.push_back(x.z());
+      }
+    }
+
+    for ( auto const& [key, r] : crvMap ) {
+      ev_.crvBar.push_back(std::get<0>(key));
+      ev_.crvT.push_back(r.t);
+      ev_.crvE.push_back(r.e);
+    }
+  }
+
+  // Generator truth: every GenParticle, |p| [MeV/c], start point [mm] and
+  // unit direction (zero for a particle at rest).
+  void CosmicStopStandAna::fillGenTruth(art::Event const& event) {
+    for ( auto const& g : *event.getValidHandle<GenParticleCollection>(conf_.genTag()) ) {
+      CLHEP::Hep3Vector const p = g.momentum().vect();
+      CLHEP::Hep3Vector const u = p.unit();
+      ev_.genPdg.push_back(g.pdgId());
+      ev_.genP.push_back(p.mag());
+      ev_.genX.push_back(g.position().x());
+      ev_.genY.push_back(g.position().y());
+      ev_.genZ.push_back(g.position().z());
+      ev_.genUx.push_back(u.x());
+      ev_.genUy.push_back(u.y());
+      ev_.genUz.push_back(u.z());
+    }
+  }
+
+  void CosmicStopStandAna::EventCols::clear() {
+    run = subrun = event = 0;
+    tagPdg = 0; tagIsStop = -1; tagPTop = -1.f; tagEndVol.clear(); tagEndProc.clear();
+    for ( auto* v : { &padIdx, &padOrigin, &padFromEle, &trkPlane, &trkPanel, &trkStraw, &trkOrigin,
+                      &trkFromEle, &caloCrystal, &caloDisk, &caloOrigin, &caloFromEle, &crvBar, &genPdg,
+                      &stopPdg, &eleFound } ) v->clear();
+    for ( auto* v : { &padT, &padE, &trkT, &trkE, &trkX, &trkY, &trkZ, &caloT, &caloE, &caloX, &caloY,
+                      &caloZ, &crvT, &crvE, &genP, &genX, &genY, &genZ, &genUx, &genUy, &genUz, &stopT,
+                      &stopTStart, &stopPEnd, &stopX, &stopY, &stopZ, &eleP, &eleCosZ } ) v->clear();
+    for ( auto* v : { &stopProc, &stopStartVol, &eleProc } ) v->clear();
+  }
+
+  void CosmicStopStandAna::clearEvent() {
+    stopIndex_.clear(); eleIndex_.clear(); originCache_.clear();
+    ev_.clear();
+  }
+
+  //================================================================
+  void CosmicStopStandAna::analyze(art::Event const& event) {
+    if ( !geomFilled_ ) fillGeometry();
+    ++sr_.nEvents;
+
+    auto const& g4Status = *event.getValidHandle<StatusG4>(conf_.g4Tag());
+    if ( g4Status.status() > 9 ) { ++sr_.nG4Bad; return; }
+
+    clearEvent();
+    ev_.run    = static_cast<int>(event.run());
+    ev_.subrun = static_cast<int>(event.subRun());
+    ev_.event  = static_cast<int>(event.event());
+
+    auto const& pvh = event.getSubRun().getValidHandle<PhysicalVolumeInfoMultiCollection>(conf_.g4Tag());
+    PhysicalVolumeMultiHelper const vi(&*pvh);
+    auto const& sims = *event.getValidHandle<SimParticleCollection>(conf_.g4Tag());
+
+    // 1) Stops first: the record origins refer to them.
+    findStops(sims, vi);
+
+    // 2) Paddle, straw, crystal and CRV records.
+    RecordMap padMap, trkMap, caloMap, crvMap;
+    paddleRecords(event, vi, padMap);
+    std::set<int> planes;
+    double caloE = 0.;
+    detectorRecords(event, trkMap, caloMap, crvMap, planes, caloE);
+
+    // 3) All-event histograms (every good event, kept or not); overflow -> last bin.
+    int    const nPlanes = std::min(static_cast<int>(planes.size()), 37);
+    double const eCalo   = std::min(caloE, hCaloE_->GetXaxis()->GetBinCenter(hCaloE_->GetNbinsX()));
+    hTrkPlanes_->Fill(nPlanes);
+    hCaloE_->Fill(eCalo);
+    hTrkCalo_->Fill(nPlanes, eCalo);
+
+    // 4) Keep decision, then the events tree.
+    bool const hasStop     = !ev_.stopPdg.empty();
+    bool const hasPaddle   = !padMap.empty();
+    bool const hasDetector = !trkMap.empty() || !caloMap.empty();
+    if ( !keepEvent(hasStop, hasPaddle, hasDetector) ) return;
+
+    flushRecords(padMap, trkMap, caloMap, crvMap);
+    fillGenTruth(event);
+    eventsTree_->Fill();
+    ++sr_.nKept;
   }
 
 }  // end namespace mu2e
