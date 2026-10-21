@@ -518,8 +518,26 @@ namespace mu2e {
     if ( inGaragePosition ) {
       G4Material*  airMaterial = findMaterialOrThrow( _config.getString("hall.insideMaterialName","G4_AIR") );
 
+      // Optional key garage.fakeDS3.zMin (Mu2e z, mm) starts garageFakeDS3Vacuum further
+      // downstream; used by the cosmic stop stand. Unset = unchanged geometry.
+      PolyconsParams garageDs3PolyParams = ds3PolyParams;
+      if ( _config.hasName("garage.fakeDS3.zMin") ) {
+        const double zMin   = _config.getDouble("garage.fakeDS3.zMin");
+        const double zLocal = zMin - relPosExtracted.z();
+        if ( !( tmp_zPlanesDs3[0] < zLocal && zLocal < tmp_zPlanesDs3[1] ) ) {
+          throw cet::exception("GEOM") << __func__
+                                       << " garage.fakeDS3.zMin = " << zMin
+                                       << " gives local z " << zLocal
+                                       << " outside the first DS3 segment ("
+                                       << tmp_zPlanesDs3[0] << ", " << tmp_zPlanesDs3[1] << ")\n";
+        }
+        vector<double> garageZPlanesDs3 = tmp_zPlanesDs3;
+        garageZPlanesDs3[0] = zLocal;
+        garageDs3PolyParams = PolyconsParams( garageZPlanesDs3, tmp_rInnerDs3, tmp_rOuterDs3 );
+      }
+
       tmpDS = nestPolycone( "garageFakeDS3Vacuum",
-                            ds3PolyParams,
+                            garageDs3PolyParams,
                             airMaterial,
                             0,
                             ds3positionInMu2e - parent.centerInMu2e() + relPosExtracted,
