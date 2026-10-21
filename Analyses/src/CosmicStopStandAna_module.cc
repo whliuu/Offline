@@ -20,8 +20,16 @@
 // Origin of a record: "stop" = index of the stop the depositing particle
 // descends from (SimParticle parent chain), -1 if none; "fromEle" = 1 if it
 // descends from that stop's decay electron. Record times are global G4 times
-// [ns], energies [MeV], positions [mm] in Mu2e coordinates (StepPointMC
-// positions already are, garage shift included).
+// [ns], energies [MeV], positions [mm] in Mu2e coordinates.
+//
+// Frames of the StepPointMC positions read here:
+//   - paddles (Mu2eG4SensitiveDetector), calorimeter (CaloCrystalSD) and CRV
+//     (CRVSD) write  world - mu2eOriginInWorld, i.e. Mu2e coordinates;
+//   - tracker (StrawSD) writes  world - DetectorSystem::toMu2e(0), i.e. the
+//     tracker (detector system) frame, the frame of Straw::getMidPoint().
+// Straw records and straw midpoints are therefore both mapped to Mu2e with
+// the same shift, DetectorSystem::toMu2e(0) - mu2eOriginInWorld (see
+// trackerToMu2eShift()); all other positions are used as they are.
 //
 // Output, in the TFileService directory named after the module label:
 //   TTree events    one entry per kept event (parameter keep)
@@ -39,9 +47,10 @@
 // Events with StatusG4::status() > 9 are counted in n_g4bad and skipped.
 //
 // The geometry tree is filled in beginRun when WorldG4 is already there (in
-// a Mu2eG4 job the g4run beginRun on the trigger path runs first), else on
-// the first event, else in endJob; if WorldG4 never exists (no Mu2eG4 in the
-// job) mu2e_origin_in_world is written as three NaNs.
+// a Mu2eG4 job the g4run beginRun on the trigger path usually runs first),
+// else on the first event, else in endJob; if WorldG4 never exists (no
+// Mu2eG4 in the job) mu2e_origin_in_world is written as three NaNs and the
+// tracker shift uses mu2eOriginInWorld = 0.
 //
 
 #include <algorithm>
@@ -209,6 +218,7 @@ namespace mu2e {
     };
 
     void readStandConfig();
+    CLHEP::Hep3Vector const& trackerToMu2eShift();
     void fillGeometry();
     void addStandVolume(std::string const& name, CLHEP::Hep3Vector const& center, double const* half);
 
@@ -230,6 +240,10 @@ namespace mu2e {
     std::vector<art::InputTag> paddleTags_;   // g4Tag label, instance CosmicStopPaddle_<i>
     bool runSeen_    = false;
     bool geomFilled_ = false;
+
+    // Tracker (detector system) frame -> Mu2e, set on first use (trackerToMu2eShift()).
+    CLHEP::Hep3Vector trkShift_;
+    bool trkShiftSet_ = false;
 
     // Per-event lookup tables.
     std::unordered_map<std::size_t,int>    stopIndex_;   // muon key -> stop index
@@ -442,6 +456,28 @@ namespace mu2e {
     }
   }
 
+  // Shift that maps a tracker-frame position to Mu2e: StrawSD stores
+  //   p = world - DetectorSystem::toMu2e(0)      (StrawSD.cc, detectorOrigin)
+  // and the Mu2e frame of the other SDs is  world - mu2eOriginInWorld, so
+  //   Mu2e = p + DetectorSystem::toMu2e(0) - mu2eOriginInWorld.
+  // StrawSD's own check (verbosity > 3) states that the G4 straw centre is at
+  // world = getMidPoint() + DetectorSystem::toMu2e(0), so the same shift maps the
+  // straw midpoints. Set once per job; mu2eOriginInWorld = 0 if WorldG4 is absent.
+  CLHEP::Hep3Vector const& CosmicStopStandAna::trackerToMu2eShift() {
+    if ( !trkShiftSet_ ) {
+      art::ServiceHandle<GeometryService> geom;
+      trkShift_ = GeomHandle<DetectorSystem>()->toMu2e(CLHEP::Hep3Vector());
+      if ( geom->hasElement<WorldG4>() ) {
+        trkShift_ -= GeomHandle<WorldG4>()->mu2eOriginInWorld();
+      } else {
+        mf::LogWarning("CosmicStopStandAna") << "WorldG4 not available: tracker frame -> Mu2e "
+                                             << "shift assumes mu2eOriginInWorld = 0\n";
+      }
+      trkShiftSet_ = true;
+    }
+    return trkShift_;
+  }
+
   void CosmicStopStandAna::addStandVolume(std::string const& name, CLHEP::Hep3Vector const& center,
                                           double const* half) {
     geo_.volName.push_back(name);
@@ -468,15 +504,15 @@ namespace mu2e {
     geo_.garageZOffset = c.getBool("inGaragePosition", false) ? c.getDouble("garage.zOffset") : 0.;
 
     // Straws: every straw of every existing plane (Mu2eG4 skips the others).
-    // Straw positions are in the detector (tracker) frame; DetectorSystem maps
-    // them to Mu2e, as StrawSD does for the G4 hits.
+    // Straw::getMidPoint() is in the tracker frame; the same shift as for the
+    // straw records maps it to Mu2e (trackerToMu2eShift()).
     if ( geom->hasElement<Tracker>() ) {
       Tracker const& tracker = *GeomHandle<Tracker>();
-      GeomHandle<DetectorSystem> det;
+      CLHEP::Hep3Vector const shift = trackerToMu2eShift();
       for ( Straw const& straw : tracker.straws() ) {
         StrawId const& id = straw.id();
         if ( !id.valid() || straw.halfLength() <= 0. || !tracker.planeExists(id) ) continue;
-        CLHEP::Hep3Vector const mid = det->toMu2e(straw.getMidPoint());
+        CLHEP::Hep3Vector const mid = straw.getMidPoint() + shift;
         CLHEP::Hep3Vector const& dir = straw.getDirection();
         geo_.strawPlane.push_back(id.plane());
         geo_.strawPanel.push_back(id.panel());
@@ -746,9 +782,12 @@ namespace mu2e {
       ev_.padE.push_back(r.e);
     }
 
+    // Straw records: StrawSD positions are in the tracker frame; map the
+    // energy-weighted mean to Mu2e (a translation commutes with the mean).
+    CLHEP::Hep3Vector const trkShift = trkMap.empty() ? CLHEP::Hep3Vector() : trackerToMu2eShift();
     for ( auto const& [key, r] : trkMap ) {
       StrawId const sid(static_cast<uint16_t>(std::get<0>(key)));
-      CLHEP::Hep3Vector const x = r.ePos/r.e;
+      CLHEP::Hep3Vector const x = r.ePos/r.e + trkShift;
       ev_.trkPlane.push_back(sid.plane());
       ev_.trkPanel.push_back(sid.panel());
       ev_.trkStraw.push_back(sid.straw());
